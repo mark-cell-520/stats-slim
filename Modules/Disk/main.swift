@@ -1,0 +1,410 @@
+//
+//  main.swift
+//  Disk
+//
+//  Created by Serhiy Mytrovtsiy on 07/05/2020.
+//  Using Swift 5.0.
+//  Running on macOS 10.15.
+//
+//  Copyright © 2020 Serhiy Mytrovtsiy. All rights reserved.
+//
+
+import Cocoa
+import Kit
+
+public struct stats: Codable {
+    var read: Int64 = 0
+    var write: Int64 = 0
+    
+    var readBytes: Int64 = 0
+    var writeBytes: Int64 = 0
+}
+
+public struct smart_t: Codable {
+    var temperature: Int = 0
+    var life: Int = 0
+    var totalRead: Int64 = 0
+    var totalWritten: Int64 = 0
+    var powerCycles: Int = 0
+    var powerOnHours: Int = 0
+    var criticalWarning: Int? = nil
+    var availableSpare: Int? = nil
+    var spareThreshold: Int? = nil
+    var unsafeShutdowns: Int? = nil
+    var mediaErrors: Int64? = nil
+}
+
+internal func smartCriticalWarnings(_ value: Int) -> [String] {
+    var list: [String] = []
+    if value & 0x01 != 0 { list.append(localizedString("Spare below threshold")) }
+    if value & 0x02 != 0 { list.append(localizedString("Temperature out of range")) }
+    if value & 0x04 != 0 { list.append(localizedString("Reliability degraded")) }
+    if value & 0x08 != 0 { list.append(localizedString("Read-only mode")) }
+    if value & 0x10 != 0 { list.append(localizedString("Backup failed")) }
+    return list
+}
+
+public struct drive: Codable {
+    var uuid: String = ""
+    var mediaName: String = ""
+    var BSDName: String = ""
+    
+    var root: Bool = false
+    var removable: Bool = false
+    
+    var model: String = ""
+    var path: URL?
+    var connectionType: String = ""
+    var fileSystem: String = ""
+    var writable: Bool = true
+    var encrypted: Bool = false
+    
+    public var size: Int64 = 1
+    public var free: Int64 = 0
+    
+    var activity: stats = stats()
+    var smart: smart_t? = nil
+
+    public init(size: Int64 = 1, free: Int64 = 0) {
+        self.size = size
+        self.free = free
+    }
+
+    public var percentage: Double {
+        let total = self.size
+        let free = self.free
+        var usedSpace = total - free
+        if usedSpace < 0 {
+            usedSpace = 0
+        }
+        if total == 0 {
+            return 0
+        }
+        return Double(usedSpace) / Double(total)
+    }
+    
+    public var popupState: Bool {
+        Store.shared.bool(key: "Disk_\(self.uuid)_popup", defaultValue: true)
+    }
+    
+    public func remote() -> String {
+        return "\(self.uuid),\(self.size),\(self.size-self.free),\(self.free),\(self.activity.read),\(self.activity.write)"
+    }
+}
+
+public class Disks: Codable, RemoteType {
+    private var queue: DispatchQueue = DispatchQueue(label: "eu.exelban.Stats.Disk.SynchronizedArray")
+    private var _array: [drive] = []
+    public var array: [drive] {
+        get { self.queue.sync { self._array } }
+        set { self.queue.sync { self._array = newValue } }
+    }
+    
+    enum CodingKeys: String, CodingKey {
+        case array
+    }
+    
+    required public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.array = try container.decode(Array<drive>.self, forKey: CodingKeys.array)
+    }
+    
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(array, forKey: .array)
+    }
+    
+    init() {}
+    
+    public var count: Int {
+        self.queue.sync { self._array.count }
+    }
+    
+    public func first(where predicate: (drive) -> Bool) -> drive? {
+        return self.array.first(where: predicate)
+    }
+    
+    public func index(where predicate: (drive) -> Bool) -> Int? {
+        return self.array.firstIndex(where: predicate)
+    }
+    
+    public func map<ElementOfResult>(_ transform: (drive) -> ElementOfResult?) -> [ElementOfResult] {
+        return self.array.compactMap(transform)
+    }
+    
+    public func filter(where isIncluded: (drive) -> Bool) -> [drive] {
+        return self.array.filter(isIncluded)
+    }
+    
+    public func reversed() -> [drive] {
+        return self.array.reversed()
+    }
+    
+    func forEach(_ body: (drive) -> Void) {
+        self.array.forEach(body)
+    }
+    
+    public func append( _ element: drive) {
+        if !self.array.contains(where: {$0.BSDName == element.BSDName}) {
+            self.array.append(element)
+        }
+    }
+    
+    public func remove(at index: Int) {
+        self.array.remove(at: index)
+    }
+    
+    public func sort() {
+        self.array.sort{ $1.removable }
+    }
+    
+    func updateFreeSize(_ idx: Int, newValue: Int64) {
+        self.array[idx].free = newValue
+    }
+    
+    func updateSMARTData(_ idx: Int, smart: smart_t?) {
+        self.array[idx].smart = smart
+    }
+    
+    public func remote() -> Data? {
+        let arr = self.array.filter({ !$0.removable })
+        var string = "\(arr.count),"
+        for (i, v) in arr.enumerated() {
+            string += v.remote()
+            if i != self.array.count {
+                string += ","
+            }
+        }
+        string += "$"
+        return string.data(using: .utf8)
+    }
+}
+
+public struct Disk_process: Process_p, Codable {
+    public var base: DataSizeBase {
+        DataSizeBase(rawValue: Store.shared.string(key: "\(ModuleType.disk.stringValue)_base", defaultValue: "byte")) ?? .byte
+    }
+    public var speedUnit: String {
+        networkSpeedUnit(from: Store.shared.string(key: "\(ModuleType.disk.stringValue)_speedUnit", defaultValue: NetworkSpeedUnitAuto)).key
+    }
+    
+    public var pid: Int
+    public var name: String
+    public var icon: NSImage {
+        ProcessIconCache.shared.icon(for: self.pid)
+    }
+    
+    var read: Int
+    var write: Int
+    
+    init(pid: Int, name: String, read: Int, write: Int) {
+        self.pid = pid
+        self.name = name
+        self.read = read
+        self.write = write
+        
+        if let app = NSRunningApplication(processIdentifier: pid_t(pid)) {
+            if let name = app.localizedName {
+                self.name = name
+            }
+        }
+    }
+}
+
+public class Disk: Module {
+    private let popupView: Popup = Popup(.disk)
+    private let settingsView: Settings = Settings(.disk)
+    private let portalView: Portal = Portal(.disk, height: 120)
+    private let notificationsView: Notifications = Notifications(.disk)
+    private let previewView: Preview = Preview(.disk)
+    
+    private var capacityReader: CapacityReader?
+    private var activityReader: ActivityReader?
+    private var processReader: ProcessReader?
+    private var smartReader: SMARTReader?
+    
+    private var selectedDisk: String = ""
+    
+    private var textValue: String {
+        Store.shared.string(key: "\(self.name)_textWidgetValue", defaultValue: "$capacity.free/$capacity.total")
+    }
+    
+    private var systemWidgetsUpdatesState: Bool {
+        self.userDefaults?.bool(forKey: "systemWidgetsUpdates_state") ?? false
+    }
+    
+    private var mainColor: NSColor {
+        SColor.fromString(Store.shared.string(key: "\(self.name)_mainColor", defaultValue: SColor.secondBlue.key)).additional as! NSColor
+    }
+    
+    public init() {
+        super.init(
+            moduleType: .disk,
+            popup: self.popupView,
+            settings: self.settingsView,
+            portal: self.portalView,
+            notifications: self.notificationsView,
+            preview: self.previewView
+        )
+        guard self.available else { return }
+        
+        self.capacityReader = CapacityReader(.disk) { [weak self] value in
+            if let value {
+                self?.capacityCallback(value)
+            }
+        }
+        self.activityReader = ActivityReader(.disk) { [weak self] value in
+            if let value {
+                self?.activityCallback(value)
+            }
+        }
+        self.processReader = ProcessReader(.disk) { [weak self] value in
+            if let list = value {
+                self?.popupView.processCallback(list)
+                self?.previewView.processCallback(list)
+            }
+        }
+        self.smartReader = SMARTReader(.disk) { [weak self] value in
+            if let value {
+                self?.SMARTCallback(value)
+            }
+        }
+        
+        self.selectedDisk = Store.shared.string(key: "\(ModuleType.disk.stringValue)_disk", defaultValue: self.selectedDisk)
+        
+        self.settingsView.selectedDiskHandler = { [weak self] value in
+            self?.selectedDisk = value
+            self?.capacityReader?.read()
+        }
+        self.settingsView.callback = { [weak self] in
+            self?.capacityReader?.read()
+            self?.smartReader?.read()
+        }
+        self.settingsView.setInterval = { [weak self] value in
+            self?.capacityReader?.setInterval(value)
+        }
+        self.settingsView.setSMARTInterval = { [weak self] value in
+            self?.smartReader?.setInterval(value)
+        }
+        self.settingsView.callbackWhenUpdateNumberOfProcesses = { [weak self] in
+            self?.popupView.numberOfProcessesUpdated()
+            self?.previewView.numberOfProcessesUpdated()
+            DispatchQueue.global(qos: .background).async {
+                self?.processReader?.read()
+            }
+        }
+        
+        self.setReaders([self.capacityReader, self.activityReader, self.processReader, self.smartReader])
+    }
+    
+    private func capacityCallback(_ value: Disks) {
+        guard self.enabled else { return }
+        
+        DispatchQueue.main.async(execute: {
+            self.popupView.capacityCallback(value)
+            self.previewView.capacityCallback(value)
+        })
+        self.settingsView.setList(value)
+        
+        guard let d = value.first(where: { $0.mediaName == self.selectedDisk }) ?? value.first(where: { $0.root }) else {
+            return
+        }
+        
+        self.portalView.utilizationCallback(d)
+        self.notificationsView.utilizationCallback(d.percentage)
+        
+        self.menuBar.widgets.filter{ $0.isActive }.forEach { (w: SWidget) in
+            switch w.item {
+            case let widget as Mini: widget.setValue(d.percentage)
+            case let widget as BarChart: widget.setValue([[ColorValue(d.percentage)]])
+            case let widget as MemoryWidget:
+                widget.setValue((DiskSize(d.free).getReadableMemory(), DiskSize(d.size - d.free).getReadableMemory()), usedPercentage: d.percentage)
+            case let widget as PieChart:
+                widget.setValue([
+                    ColorValue(d.percentage, color: self.mainColor)
+                ])
+            case let widget as TextWidget:
+                var text = "\(self.textValue)"
+                let pairs = TextWidget.parseText(text)
+                pairs.forEach { pair in
+                    var replacement: String? = nil
+                    
+                    switch pair.key {
+                    case "$capacity":
+                        switch pair.value {
+                        case "total": replacement = DiskSize(d.size).getReadableMemory()
+                        case "used": replacement = DiskSize(d.size - d.free).getReadableMemory()
+                        case "free": replacement = DiskSize(d.free).getReadableMemory()
+                        default: return
+                        }
+                    case "$percentage":
+                        var percentage: Int
+                        if d.size == 0 {
+                            percentage = 0
+                        } else {
+                            switch pair.value {
+                            case "used": percentage = Int((Double(d.size - d.free) / Double(d.size)) * 100)
+                            case "free": percentage = Int((Double(d.free) / Double(d.size)) * 100)
+                            default: return
+                            }
+                        }
+                        replacement = "\(percentage < 0 ? 0 : percentage)%"
+                    default: return
+                    }
+                    
+                    if let replacement {
+                        let key = pair.value.isEmpty ? pair.key : "\(pair.key).\(pair.value)"
+                        text = text.replacingOccurrences(of: key, with: replacement)
+                    }
+                }
+                widget.setValue(text)
+            default: break
+            }
+        }
+        
+        if self.systemWidgetsUpdatesState {
+            SystemWidgetUpdates.shared.update(d, key: "Disk@CapacityReader", kinds: [DiskWidgetKind, "UnitedWidget"], defaults: self.userDefaults)
+        }
+    }
+    
+    private func activityCallback(_ value: Disks) {
+        guard self.enabled else { return }
+        
+        DispatchQueue.main.async(execute: {
+            self.popupView.activityCallback(value)
+            self.previewView.activityCallback(value)
+        })
+        
+        guard let d = value.first(where: { $0.mediaName == self.selectedDisk }) ?? value.first(where: { $0.root }) else {
+            return
+        }
+        
+        self.portalView.activityCallback(d)
+        
+        self.menuBar.widgets.filter{ $0.isActive }.forEach { (w: SWidget) in
+            switch w.item {
+            case let widget as SpeedWidget: 
+                widget.setValue(input: d.activity.read, output: d.activity.write)
+            case let widget as NetworkChart:
+                widget.setValue(upload: Double(d.activity.write), download: Double(d.activity.read))
+                if self.capacityReader?.interval != 1 {
+                    self.settingsView.setUpdateInterval(value: 1)
+                }
+            default: break
+            }
+        }
+    }
+    
+    private func SMARTCallback(_ value: Disks) {
+        guard self.enabled else { return }
+        
+        DispatchQueue.main.async(execute: {
+            self.popupView.smartCallback(value)
+        })
+        self.previewView.smartCallback(value)
+    }
+}
+
+// 桌面组件的 kind。此字符串必须与 widget.swift 里 Disk_entry.kind 保持一致——
+// 那个结构体现在只编进 WidgetsExtension 目标，app 侧链接不到，所以在这里留一份字面量。
+internal let DiskWidgetKind = "DiskWidget"

@@ -1,0 +1,51 @@
+name: release
+
+# 上游的 release.yaml 需要 Apple 开发者证书、公证账号和 DMG 制作工具，分叉拿不到这些
+# 密钥，所以改成「构建 + 打 zip + 发布」。产物不签名不公证，用户在 README 里能看到
+# 首次打开的处理方法。
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Build
+        run: |
+          xcodebuild -project Stats.xcodeproj -scheme Stats -configuration Release \
+            -derivedDataPath build build
+
+      - name: Verify app and widget versions match
+        run: |
+          app=$(/usr/libexec/PlistBuddy -c "Print CFBundleShortVersionString" \
+            build/Build/Products/Release/Stats.app/Contents/Info.plist)
+          widget=$(/usr/libexec/PlistBuddy -c "Print CFBundleShortVersionString" \
+            build/Build/Products/Release/Stats.app/Contents/PlugIns/WidgetsExtension.appex/Contents/Info.plist)
+          echo "app: $app, widget: $widget"
+          [ "$app" = "$widget" ] || { echo "ERROR: widget version does not match app"; exit 1; }
+
+      - name: Zip
+        run: |
+          cd build/Build/Products/Release
+          ditto -c -k --sequesterRsrc --keepParent Stats.app Stats.zip
+          shasum -a 256 Stats.zip
+
+      - name: Publish
+        uses: softprops/action-gh-release@v2
+        with:
+          files: build/Build/Products/Release/Stats.zip
+          body: |
+            未签名的构建产物。首次打开前执行 `xattr -cr /Applications/Stats.app`，
+            或在访达里按住 Control 点图标选「打开」。详见仓库 README 的「安装」一节。

@@ -1,0 +1,483 @@
+//
+//  Sensors.swift
+//  Kit
+//
+//  Created by Serhiy Mytrovtsiy on 17/06/2020.
+//  Using Swift 5.0.
+//  Running on macOS 10.15.
+//
+//  Copyright © 2020 Serhiy Mytrovtsiy. All rights reserved.
+//
+
+import Cocoa
+
+public struct Stack_t: KeyValue_p {
+    public var key: String
+    public var value: String
+    public var label: String?
+    
+    var index: Int {
+        get { Store.shared.int(key: "stack_\(self.key)_index", defaultValue: -1) }
+        set { Store.shared.set(key: "stack_\(self.key)_index", value: newValue) }
+    }
+    
+    public init(key: String, value: String, label: String? = nil) {
+        self.key = key
+        self.value = value
+        self.label = label
+    }
+}
+
+public class StackWidget: WidgetWrapper {
+    private var modeState: StackMode = .auto
+    private var fixedSizeState: Bool = false
+    private var monospacedFontState: Bool = false
+    private var alignmentState: String = "left"
+    
+    private var values: [Stack_t] = []
+    private let textCache = WidgetTextCache(limit: 256)
+    
+    private var oneRowWidth: CGFloat = 45
+    private var twoRowWidth: CGFloat = 32
+    
+    private let orderTableView: OrderTableView = OrderTableView()
+    
+    private var alignment: NSTextAlignment {
+        if let alignmentPair = Alignments.first(where: { $0.key == self.alignmentState }) {
+            return alignmentPair.additional as? NSTextAlignment ?? .left
+        }
+        return .left
+    }
+    
+    public init(title: String, config: NSDictionary?, preview: Bool = false) {
+        if let config, preview {
+            if let previewConfig = config["Preview"] as? NSDictionary {
+                if let value = previewConfig["Values"] as? String {
+                    for (i, value) in value.split(separator: ",").enumerated() {
+                        self.values.append(Stack_t(key: "\(i)", value: String(value)))
+                    }
+                }
+            }
+        }
+        
+        super.init(.stack, title: title, frame: CGRect(
+            x: 0,
+            y: Constants.Widget.margin.y,
+            width: Constants.Widget.width,
+            height: Constants.Widget.height - (2*Constants.Widget.margin.y)
+        ))
+        
+        if !preview {
+            self.modeState = StackMode(rawValue: Store.shared.string(key: "\(self.title)_\(self.type.rawValue)_mode", defaultValue: self.modeState.rawValue)) ?? .auto
+            self.fixedSizeState = Store.shared.bool(key: "\(self.title)_\(self.type.rawValue)_size", defaultValue: self.fixedSizeState)
+            self.monospacedFontState = Store.shared.bool(key: "\(self.title)_\(self.type.rawValue)_monospacedFont", defaultValue: self.monospacedFontState)
+            self.alignmentState = Store.shared.string(key: "\(self.title)_\(self.type.rawValue)_alignment", defaultValue: self.alignmentState)
+        }
+        
+        self.orderTableView.getList = { [weak self] in
+            self?.values ?? []
+        }
+        self.orderTableView.setList = { [weak self] newList in
+            guard let self else { return }
+            self.queue.sync {
+                self.values = newList
+            }
+        }
+        self.orderTableView.reorderCallback = { [weak self] in
+            self?.display()
+        }
+    }
+    
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+    
+    public override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+        
+        var values: [Stack_t] = []
+        var mode: StackMode = .auto
+        self.queue.sync {
+            values = self.values
+            mode = self.modeState
+        }
+        
+        guard !values.isEmpty else {
+            self.setWidth(0)
+            return
+        }
+        
+        let num: Int = Int(round(Double(values.count) / 2))
+        var totalWidth: CGFloat = Constants.Widget.spacing  // opening space
+        var x: CGFloat = Constants.Widget.spacing
+        
+        var i = 0
+        while i < values.count {
+            switch mode {
+            case .auto, .twoRows:
+                let firstElement: Stack_t = values[i]
+                let secondElement: Stack_t? = values.indices.contains(i+1) ? values[i+1] : nil
+                
+                var width: CGFloat = 0
+                if mode == .auto && secondElement == nil {
+                    width += self.drawOneRow(x, firstElement)
+                } else {
+                    width += self.drawTwoRows(x, firstElement, secondElement)
+                }
+                
+                x += width
+                totalWidth += width
+                
+                if num != 1 && (i/2) != num {
+                    x += Constants.Widget.spacing
+                    totalWidth += Constants.Widget.spacing
+                }
+                
+                i += 1
+            case .oneRow:
+                let width = self.drawOneRow(x, values[i])
+                
+                x += width
+                totalWidth += width
+                
+                // add margins between columns
+                if values.count != 1 && i != values.count {
+                    x += Constants.Widget.spacing
+                    totalWidth += Constants.Widget.spacing
+                }
+            }
+            
+            i += 1
+        }
+        totalWidth += Constants.Widget.spacing // closing space
+        
+        guard abs(self.frame.width - totalWidth) > 2 else { return }
+        self.setWidth(totalWidth)
+    }
+    
+    private func drawOneRow(_ x: CGFloat, _ element: Stack_t) -> CGFloat {
+        var monospacedFontState: Bool = false
+        var fixedSizeState: Bool = false
+        var alignment: NSTextAlignment = .left
+        self.queue.sync {
+            monospacedFontState = self.monospacedFontState
+            fixedSizeState = self.fixedSizeState
+            alignment = self.alignment
+        }
+        
+        let entry = self.textCache.entry(element.value, key: "one|\(monospacedFontState)|\(alignment.rawValue)") {
+            let font: NSFont = monospacedFontState
+                ? NSFont.monospacedDigitSystemFont(ofSize: 13, weight: .regular)
+                : NSFont.systemFont(ofSize: 13, weight: .regular)
+            let style = NSMutableParagraphStyle()
+            style.alignment = alignment
+            return [
+                NSAttributedString.Key.font: font,
+                NSAttributedString.Key.foregroundColor: NSColor.textColor,
+                NSAttributedString.Key.paragraphStyle: style
+            ]
+        }
+        
+        var width: CGFloat = self.oneRowWidth
+        if !fixedSizeState {
+            width = entry.width.rounded(.up) + 2
+        }
+        
+        let rect = CGRect(x: x, y: (Constants.Widget.height-13)/2, width: width, height: 13)
+        entry.string.draw(with: rect)
+        
+        return width
+    }
+    
+    private func drawTwoRows(_ x: CGFloat, _ topElement: Stack_t, _ bottomElement: Stack_t?) -> CGFloat {
+        let rowHeight: CGFloat = self.frame.height / 2
+        var monospacedFontState: Bool = false
+        var fixedSizeState: Bool = false
+        var alignment: NSTextAlignment = .left
+        self.queue.sync {
+            monospacedFontState = self.monospacedFontState
+            fixedSizeState = self.fixedSizeState
+            alignment = self.alignment
+        }
+        
+        let key = "two|\(monospacedFontState)|\(alignment.rawValue)"
+        let attributes: () -> [NSAttributedString.Key: Any] = {
+            let font: NSFont = monospacedFontState
+                ? NSFont.monospacedDigitSystemFont(ofSize: 10, weight: .light)
+                : NSFont.systemFont(ofSize: 10, weight: .light)
+            let style = NSMutableParagraphStyle()
+            style.alignment = alignment
+            return [
+                NSAttributedString.Key.font: font,
+                NSAttributedString.Key.foregroundColor: NSColor.textColor,
+                NSAttributedString.Key.paragraphStyle: style
+            ]
+        }
+        
+        let top = self.textCache.entry(topElement.value, key: key, attributes: attributes)
+        let bottom = bottomElement.map { self.textCache.entry($0.value, key: key, attributes: attributes) }
+        
+        var width: CGFloat = self.twoRowWidth
+        if !fixedSizeState {
+            width = max(20, max(top.width, bottom?.width ?? 0)).rounded(.up) + 2
+        }
+        
+        top.string.draw(with: CGRect(x: x, y: rowHeight+1, width: width, height: rowHeight))
+        if let bottom {
+            bottom.string.draw(with: CGRect(x: x, y: 1, width: width, height: rowHeight))
+        }
+        
+        return width
+    }
+    
+    public func setValues(_ values: [Stack_t]) {
+        DispatchQueue.main.async(execute: {
+            var tableNeedsToBeUpdated: Bool = false
+            
+            self.queue.sync {
+                values.forEach { (p: Stack_t) in
+                    if let idx = self.values.firstIndex(where: { $0.key == p.key }) {
+                        self.values[idx].value = p.value
+                        return
+                    }
+                    tableNeedsToBeUpdated = true
+                    self.values.append(p)
+                }
+                
+                let diff = self.values.filter({ v in values.contains(where: { $0.key == v.key }) })
+                if diff.count != self.values.count {
+                    tableNeedsToBeUpdated = true
+                }
+                self.values = diff.sorted(by: { $0.index < $1.index })
+            }
+            
+            if tableNeedsToBeUpdated {
+                self.orderTableView.update()
+            }
+            self.needsDisplay = true
+        })
+    }
+    
+    // MARK: - Settings
+    
+    public override func settings() -> NSView {
+        let view = SettingsContainerView()
+        
+        var rows = [
+            PreferencesRow(localizedString("Display mode"), component: selectView(
+                action: #selector(self.changeDisplayMode),
+                items: SensorsWidgetMode,
+                selected: self.modeState.rawValue
+            )),
+            PreferencesRow(localizedString("Monospaced font"), component: switchView(
+                action: #selector(self.toggleMonospacedFont),
+                state: self.monospacedFontState
+            )),
+            PreferencesRow(localizedString("Alignment"), component: selectView(
+                action: #selector(self.toggleAlignment),
+                items: Alignments,
+                selected: self.alignmentState
+            ))
+        ]
+        if self.title != "Clock" {
+            rows.append(PreferencesRow(localizedString("Static width"), component: switchView(
+                action: #selector(self.toggleSize),
+                state: self.fixedSizeState
+            )))
+        }
+        view.addArrangedSubview(PreferencesSection(rows))
+        
+        view.addArrangedSubview(self.orderTableView)
+        
+        return view
+    }
+    
+    @objc private func changeDisplayMode(_ sender: NSMenuItem) {
+        guard let key = sender.representedObject as? String else { return }
+        self.queue.sync {
+            self.modeState = StackMode(rawValue: key) ?? .auto
+        }
+        Store.shared.set(key: "\(self.title)_\(self.type.rawValue)_mode", value: key)
+        self.display()
+    }
+    
+    @objc private func toggleSize(_ sender: NSControl) {
+        let state = controlState(sender)
+        self.queue.sync {
+            self.fixedSizeState = state
+        }
+        Store.shared.set(key: "\(self.title)_\(self.type.rawValue)_size", value: self.fixedSizeState)
+        self.display()
+    }
+    
+    @objc private func toggleMonospacedFont(_ sender: NSControl) {
+        let state = controlState(sender)
+        self.queue.sync {
+            self.monospacedFontState = state
+        }
+        Store.shared.set(key: "\(self.title)_\(self.type.rawValue)_monospacedFont", value: self.monospacedFontState)
+        self.display()
+    }
+    
+    @objc private func toggleAlignment(_ sender: NSMenuItem) {
+        guard let key = sender.representedObject as? String else { return }
+        if let newAlignment = Alignments.first(where: { $0.key == key }) {
+            self.queue.sync {
+                self.alignmentState = newAlignment.key
+            }
+        }
+        Store.shared.set(key: "\(self.title)_\(self.type.rawValue)_alignment", value: key)
+        self.display()
+    }
+}
+
+private class OrderTableView: NSView, NSTableViewDelegate, NSTableViewDataSource {
+    private let scrollView = NSScrollView()
+    private let tableView = NSTableView()
+    private var dragDropType = NSPasteboard.PasteboardType(rawValue: "\(Bundle.main.bundleIdentifier!).sensors-row")
+    
+    fileprivate var reorderCallback: () -> Void = {}
+    fileprivate var getList: () -> [Stack_t] = { [] }
+    fileprivate var setList: ([Stack_t]) -> Void = { _ in }
+    
+    init() {
+        super.init(frame: NSRect.zero)
+        
+        self.wantsLayer = true
+        self.layer?.cornerRadius = 3
+        
+        self.scrollView.translatesAutoresizingMaskIntoConstraints = false
+        self.scrollView.documentView = self.tableView
+        self.scrollView.hasHorizontalScroller = false
+        self.scrollView.hasVerticalScroller = true
+        self.scrollView.autohidesScrollers = true
+        self.scrollView.backgroundColor = NSColor.clear
+        self.scrollView.drawsBackground = true
+        
+        self.tableView.frame = self.scrollView.bounds
+        self.tableView.delegate = self
+        self.tableView.dataSource = self
+        self.tableView.headerView = nil
+        self.tableView.backgroundColor = NSColor.clear
+        self.tableView.columnAutoresizingStyle = .firstColumnOnlyAutoresizingStyle
+        self.tableView.registerForDraggedTypes([dragDropType])
+        self.tableView.gridColor = .gridColor
+        self.tableView.gridStyleMask = [.solidVerticalGridLineMask, .solidHorizontalGridLineMask]
+        self.tableView.style = .plain
+        
+        self.tableView.addTableColumn(NSTableColumn(identifier: NSUserInterfaceItemIdentifier(rawValue: "name")))
+        
+        self.addSubview(self.scrollView)
+        
+        NSLayoutConstraint.activate([
+            self.scrollView.leftAnchor.constraint(equalTo: self.leftAnchor),
+            self.scrollView.rightAnchor.constraint(equalTo: self.rightAnchor),
+            self.scrollView.topAnchor.constraint(equalTo: self.topAnchor),
+            self.scrollView.bottomAnchor.constraint(equalTo: self.bottomAnchor),
+            
+            self.heightAnchor.constraint(equalToConstant: 120)
+        ])
+    }
+    
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+    
+    deinit {
+        NotificationCenter.default.removeObserver(self)
+    }
+    
+    fileprivate func update() {
+        self.tableView.reloadData()
+    }
+    
+    func numberOfRows(in tableView: NSTableView) -> Int {
+        return self.getList().count
+    }
+    
+    func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
+        let list = self.getList()
+        if !list.indices.contains(row) { return nil }
+        let item = list[row]
+        
+        let text: NSTextField = NSTextField()
+        text.drawsBackground = false
+        text.isBordered = false
+        text.isEditable = false
+        text.isSelectable = false
+        text.translatesAutoresizingMaskIntoConstraints = false
+        text.identifier = NSUserInterfaceItemIdentifier(item.key)
+        
+        switch tableColumn?.identifier.rawValue {
+        case "name": text.stringValue = item.label ?? item.key
+        default: break
+        }
+        
+        text.sizeToFit()
+        
+        let cell = NSTableCellView()
+        cell.addSubview(text)
+        
+        NSLayoutConstraint.activate([
+            text.widthAnchor.constraint(equalTo: cell.widthAnchor),
+            text.centerYAnchor.constraint(equalTo: cell.centerYAnchor)
+        ])
+        
+        return cell
+    }
+    
+    func tableView(_ tableView: NSTableView, pasteboardWriterForRow row: Int) -> NSPasteboardWriting? {
+        let item = NSPasteboardItem()
+        item.setString(String(row), forType: self.dragDropType)
+        return item
+    }
+    
+    func tableView(_ tableView: NSTableView, validateDrop info: NSDraggingInfo, proposedRow row: Int, proposedDropOperation dropOperation: NSTableView.DropOperation) -> NSDragOperation {
+        if dropOperation == .above {
+            return .move
+        }
+        return []
+    }
+    
+    func tableView(_ tableView: NSTableView, acceptDrop info: NSDraggingInfo, row: Int, dropOperation: NSTableView.DropOperation) -> Bool {
+        var oldIndexes = [Int]()
+        info.enumerateDraggingItems(options: [], for: tableView, classes: [NSPasteboardItem.self], searchOptions: [:]) { dragItem, _, _ in
+            if let str = (dragItem.item as! NSPasteboardItem).string(forType: self.dragDropType), let index = Int(str) {
+                oldIndexes.append(index)
+            }
+        }
+        
+        var list = self.getList()
+        var oldIndexOffset = 0
+        var newIndexOffset = 0
+        
+        tableView.beginUpdates()
+        for oldIndex in oldIndexes {
+            let currentIdx: Int
+            let newIdx: Int
+            
+            if oldIndex < row {
+                currentIdx = oldIndex + oldIndexOffset
+                newIdx = row - 1
+                oldIndexOffset -= 1
+            } else {
+                currentIdx = oldIndex
+                newIdx = row + newIndexOffset
+                newIndexOffset += 1
+            }
+            
+            if list.indices.contains(currentIdx) && list.indices.contains(newIdx) {
+                list.insert(list.remove(at: currentIdx), at: newIdx)
+            }
+        }
+        for i in list.indices {
+            list[i].index = i
+        }
+        self.setList(list)
+        self.reorderCallback()
+        tableView.reloadData()
+        tableView.endUpdates()
+        
+        return true
+    }
+}
