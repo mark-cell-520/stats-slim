@@ -1,12 +1,14 @@
 name: build
 
+# 上游监视的是 master，本仓库的默认分支是 main，照原样这个工作流一次都不会跑。
+# 改成分支名时保留上游的两处（push 与 pull_request 都要改，漏一个 PR 上仍然不检查）。
 on:
   push:
     branches:
-      - master
+      - main
   pull_request:
     branches:
-      - master
+      - main
 
 concurrency:
   group: build-${{ github.ref }}
@@ -18,4 +20,6 @@ jobs:
 
     steps:
       - uses: actions/checkout@v7
+      # CODE_SIGNING_ALLOWED=NO 是 xcodebuild 的命令行构建设置，必须放在 archive 后面；
+      # 放到 env: 里 Xcode 不认（见 release.yaml 里的说明）。
       - run: xcodebuild -scheme Stats -destination 'platform=macOS' -configuration Release archive CODE_SIGNING_ALLOWED=NO

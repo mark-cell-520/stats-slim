@@ -23,9 +23,17 @@ jobs:
           fetch-depth: 0
 
       - name: Build
+        # 上游的 release.yaml 靠 "Developer ID Application" 证书与公证密钥，分叉没有这些
+        # 凭据，产物按 README 说明的不签名发布，所以把签名关掉。
+        # 这两个设置必须作为 xcodebuild 的命令行参数，不能挪到 env: 里——Xcode 不把这两个
+        # 环境变量当构建设置覆盖用，日志里看不到 "CODE_SIGN_IDENTITY =" 那一行，签名照旧
+        # 要找 "Developer ID Application"，然后在 WidgetsExtension / LaunchAtLogin / SMC /
+        # Helper / Stats 五个目标上报 "No signing certificate ... matching team ID
+        # RP2S87B72W"。
+        # 编出来的是通用二进制（x86_64 + arm64），与 Releases 里已发布的产物一致。
         run: |
           xcodebuild -project Stats.xcodeproj -scheme Stats -configuration Release \
-            -derivedDataPath build build
+            -derivedDataPath build CODE_SIGNING_ALLOWED=NO CODE_SIGN_IDENTITY="" build
 
       - name: Verify app and widget versions match
         run: |

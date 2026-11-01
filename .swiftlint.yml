@@ -51,6 +51,11 @@ identifier_name:
     - expires_in
     - NetworkSpeedUnitAuto
     - NetworkSpeedUnits
+    # 桌面组件的 kind 常量（各模块 main.swift 里那个 internal let）。SwiftLint 的
+    # identifier_name 只拦「首字母大写 + 第二个字母小写」，同组的 CPUWidgetKind /
+    # GPUWidgetKind / RAMWidgetKind 第二个字母是大写，被当成缩写词放行，不会报。
+    - DiskWidgetKind
+    - NetWidgetKind
 
 line_length: 200
 
