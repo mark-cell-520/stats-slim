@@ -637,51 +637,75 @@ public class SMC {
     
     private func read(_ value: UnsafeMutablePointer<SMCVal_t>) -> kern_return_t {
         guard value.pointee.key.count == 4, value.pointee.key.utf8.count == 4 else { return kIOReturnBadArgument }
-        self.keyInfoLock.lock()
-        defer { self.keyInfoLock.unlock() }
-        
+
         var result: kern_return_t = 0
         var input = SMCKeyData_t()
         var output = SMCKeyData_t()
-        
+
         input.key = FourCharCode(fromString: value.pointee.key)
         let keyInfo: SMCKeyData_t.keyInfo_t
         var cacheable = true
+        // 锁的边界重新划过一次，目的是把「读数据」那次内核调用移出锁外。
+        // 上游把两次 IOConnectCallStructMethod 全罩在锁里，而这把锁是进程级单例锁：
+        // Sensors 每个 tick 读 50-100 个 key，等于每小时 18-36 万次内核 IPC 整个串行化，
+        // CPU 的温度读数、GPU 的信息读数、电池的用电读数全排在 Sensors 后面。
+        // 但「查元数据」那一步必须继续留在锁内，而且查到就要立刻写进缓存——Tests/SMC.swift 的
+        // testConcurrentReadsShareMetadataCache 明确要求 100 个并发读只问驱动一次，锁一放，
+        // 后面的线程就会跟着miss、跟着再问一遍。元数据一个 key 一辈子只查一次，留在锁里不亏；
+        // 真正每个 tick 都发生的是读数据，那一步放到锁外去。
+        self.keyInfoLock.lock()
         if let cached = self.keyInfoCache[input.key] {
             keyInfo = cached
         } else {
             input.data8 = SMCKeys.readKeyInfo.rawValue
             result = call(SMCKeys.kernelIndex.rawValue, input: &input, output: &output)
             if result != kIOReturnSuccess {
+                self.keyInfoLock.unlock()
                 return result
             }
             // SMC reports an unavailable key as 0x84 during sensor probing.
-            if output.result == 0x84 { return kIOReturnNotFound }
-            if output.result != 0 { return kIOReturnError }
+            if output.result == 0x84 {
+                self.keyInfoLock.unlock()
+                return kIOReturnNotFound
+            }
+            if output.result != 0 {
+                self.keyInfoLock.unlock()
+                return kIOReturnError
+            }
             keyInfo = output.keyInfo
             cacheable = output.result == 0 && keyInfo.dataSize > 0 && keyInfo.dataSize <= value.pointee.bytes.count && keyInfo.dataType != 0
+            if cacheable {
+                self.keyInfoCache[input.key] = keyInfo
+            }
         }
-        
+        self.keyInfoLock.unlock()
+
         value.pointee.dataSize = UInt32(keyInfo.dataSize)
         value.pointee.dataType = keyInfo.dataType.toString()
         input.keyInfo.dataSize = keyInfo.dataSize
         input.data8 = SMCKeys.readBytes.rawValue
-        
+
         result = call(SMCKeys.kernelIndex.rawValue, input: &input, output: &output)
-        if result == kIOReturnSuccess && output.result == 0 && cacheable {
-            self.keyInfoCache[input.key] = keyInfo
-        } else {
-            self.keyInfoCache.removeValue(forKey: input.key)
+        // 读数据失败时仍然要把这个 key 从缓存里踢掉，下次重新查一遍元数据——和上游一致。
+        // 缓存已经在上面写好了，所以这里只在需要驱逐时才碰锁，正常路径上一次锁都不多拿。
+        if !(result == kIOReturnSuccess && output.result == 0 && cacheable) {
+            self.removeKeyInfo(input.key)
         }
         if result != kIOReturnSuccess {
             return result
         }
         if output.result == 0x84 { return kIOReturnNotFound }
         if output.result != 0 { return kIOReturnError }
-        
+
         memcpy(&value.pointee.bytes, &output.bytes, min(Int(value.pointee.dataSize), value.pointee.bytes.count))
-        
+
         return kIOReturnSuccess
+    }
+
+    private func removeKeyInfo(_ key: FourCharCode) {
+        self.keyInfoLock.lock()
+        defer { self.keyInfoLock.unlock() }
+        self.keyInfoCache.removeValue(forKey: key)
     }
     
     private func write(_ value: SMCVal_t) -> kern_return_t {

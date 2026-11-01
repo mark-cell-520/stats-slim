@@ -127,6 +127,22 @@ internal class UsageReader: Reader<Network_Usage>, CWEventDelegate, CLLocationMa
         set { Store.shared.set(key: "Network_interface", value: newValue) }
     }
     private var lastInterfaceID: String = ""
+    // Store.shared.string 的 defaultValue 是普通参数，不是 @autoclosure，也就是说
+    // self.interfaceID 每被读一次，self.primaryInterface 就实打实跑一遍：SCDynamicStoreCopyValue
+    // 向 configd 要一次 State:/Network/Global/IPv4，接口是虚拟接口时还要再走 physicalInterface()
+    // 里的 getifaddrs。而 readInterfaceBandwidth() 在 getifaddrs 的循环里对每个接口各读一次
+    // ——一台机器上二十来个接口，就是每 tick 二十来次 configd 往返、每小时四万次。
+    // 缓存一次就够：primary interface 一个 tick 内不会变，真要变时 lastInterfaceID 那套逻辑
+    // 会检测到（见 read() 里面对 interfaceID 变化的处理）。
+    private var cachedInterfaceID: String?
+    private var interfaceIDForCurrentRead: String {
+        if let cached = self.cachedInterfaceID {
+            return cached
+        }
+        let value = self.interfaceID
+        self.cachedInterfaceID = value
+        return value
+    }
     
     private func isVirtualInterface(_ name: String) -> Bool {
         return self.virtualInterfacePrefixes.contains(where: { name.hasPrefix($0) })
@@ -281,7 +297,10 @@ internal class UsageReader: Reader<Network_Usage>, CWEventDelegate, CLLocationMa
     
     public override func read() {
         self.checkUsageReset()
-        
+
+        // 每个 tick 开头重新解析一次接口名（接口切换要能及时跟上），解析结果本 tick 内复用，
+        // 见 interfaceIDForCurrentRead 上面的说明。
+        self.cachedInterfaceID = nil
         let interfaceID = self.interfaceID
         if interfaceID != self.lastInterfaceID {
             self.lastInterfaceID = interfaceID
@@ -289,6 +308,7 @@ internal class UsageReader: Reader<Network_Usage>, CWEventDelegate, CLLocationMa
             self.usage.bandwidth = Bandwidth()
             self.lastDetailsReadTS = .distantPast
         }
+        self.cachedInterfaceID = interfaceID
         
         self.requestDetails()
         
@@ -352,26 +372,26 @@ internal class UsageReader: Reader<Network_Usage>, CWEventDelegate, CLLocationMa
             defer { pointer = pointer?.pointee.ifa_next }
             guard let pointer = pointer else { break }
 
-            if String(cString: pointer.pointee.ifa_name) != self.interfaceID {
+            if String(cString: pointer.pointee.ifa_name) != self.interfaceIDForCurrentRead {
                 continue
             }
             self.updateInterfaceInfo(pointer)
         }
         freeifaddrs(interfaceAddresses)
-        
+
         return self.getBytesInfo() ?? Bandwidth()
     }
-    
+
     private func readInterfaceStatus() {
         var interfaceAddresses: UnsafeMutablePointer<ifaddrs>? = nil
         guard getifaddrs(&interfaceAddresses) == 0 else { return }
-        
+
         var pointer = interfaceAddresses
         while pointer != nil {
             defer { pointer = pointer?.pointee.ifa_next }
             guard let pointer = pointer else { break }
-            
-            if String(cString: pointer.pointee.ifa_name) != self.interfaceID {
+
+            if String(cString: pointer.pointee.ifa_name) != self.interfaceIDForCurrentRead {
                 continue
             }
             self.updateInterfaceInfo(pointer)
@@ -881,20 +901,16 @@ public class ProcessReader: Reader<[Network_Process]> {
             
             var process = Network_Process()
             process.time = Date()
-            
+
             let nameArray = parsedLine[0].split(separator: ".")
             if let pid = nameArray.last {
                 process.pid = Int(pid) ?? 0
             }
-            if let app = NSRunningApplication(processIdentifier: pid_t(process.pid) ) {
-                process.name = app.localizedName ?? nameArray.dropLast().joined(separator: ".")
-            } else {
-                process.name = nameArray.dropLast().joined(separator: ".")
-            }
-            
-            if process.name == "" {
-                process.name = "\(process.pid)"
-            }
+            // 名字先用 nettop 输出里那个（进程名.pid 去掉 .pid 那段）。NSRunningApplication 是
+            // 一次到 loginwindow 的 XPC 往返，而 nettop -P 会把所有带 socket 的进程都列出来
+            // （常超过一百个），最后只留用户设的那几个（默认 8）。等下面的排序和截断做完，
+            // 只给真正要显示的那几个换 localizedName，见本方法末尾。
+            process.name = nameArray.dropLast().joined(separator: ".")
             
             if let download = Int(parsedLine[1]) {
                 process.download = download
@@ -946,8 +962,22 @@ public class ProcessReader: Reader<[Network_Process]> {
             }
             return firstMax < secondMax // max values are not the same, sort by max value
         }
-        
-        self.callback(processes.suffix(self.numberOfProcesses).reversed())
+
+        let result = processes.suffix(self.numberOfProcesses).reversed()
+        // 排完序、截完条目，才给要显示的那几个换 localizedName。上游在解析每一行时就建
+        // NSRunningApplication，等于每个 tick 为一百多个进程各做一次 XPC 往返，其中九成多的
+        // 结果当场被 suffix() 扔掉。
+        let named: [Network_Process] = result.map { p in
+            var p = p
+            if p.name.isEmpty {
+                p.name = "\(p.pid)"
+            } else if let app = NSRunningApplication(processIdentifier: pid_t(p.pid)), let localized = app.localizedName {
+                p.name = localized
+            }
+            return p
+        }
+
+        self.callback(named)
     }
 }
 

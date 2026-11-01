@@ -15,7 +15,21 @@ import Kit
 internal class CombinedView: NSObject, NSGestureRecognizerDelegate {
     private var menuBarItem: NSStatusItem? = nil
     private var view: NSView = NSView(frame: NSRect(x: 0, y: 0, width: 0, height: Constants.Widget.height))
-    private var popup: PopupWindow? = nil
+    // 合并视图的弹窗也改成懒建。上游在 init 里就 PopupWindow(title:view:Popup())，
+    // 而 CombinedModules 默认是关的（见下面 status 的 defaultValue: false）——关着的时候
+    // 用户永远看不到这个弹窗，却照样在启动时建出一个 NSWindow 加 NSScrollView +
+    // NSVisualEffectView，还把 9 个模块的 portal 全挂成子视图。和 Module 的 window / popup
+    // 同一个套路，访问点也全在主线程（菜单栏点击），不需要加锁。
+    private var _popup: PopupWindow? = nil
+    private var popup: PopupWindow? {
+        get {
+            if self._popup == nil {
+                self._popup = PopupWindow(title: "Combined modules", module: .combined, view: Popup()) { _ in }
+            }
+            return self._popup
+        }
+        set { self._popup = newValue }
+    }
     
     private var status: Bool {
         Store.shared.bool(key: "CombinedModules", defaultValue: false)
@@ -51,8 +65,6 @@ internal class CombinedView: NSObject, NSGestureRecognizerDelegate {
                 }
             }
         }
-        
-        self.popup = PopupWindow(title: "Combined modules", module: .combined, view: Popup()) { _ in }
         
         if self.status {
             self.enable()

@@ -279,7 +279,10 @@ public class ProcessReader: Reader<[TopProcess]> {
         
         let task = Process()
         task.executableURL = URL(fileURLWithPath: "/usr/bin/top")
-        task.arguments = ["-o", "power", "-l", "2", "-n", "\(self.numberOfProcesses)", "-stats", "pid,command,power"]
+        // -l 2 会让 top 采两次全系统样本再输出，每次约 0.3-0.6 秒 CPU、1-2 秒墙钟。而这个
+        // reader 的间隔是 2 秒，弹窗开着时等于让 top 背靠背地跑，每小时 1800 次。
+        // 这里要的只是「每个进程的 power」这一列的瞬时值，一次采样就够，不需要差值。
+        task.arguments = ["-o", "power", "-l", "1", "-n", "\(self.numberOfProcesses)", "-stats", "pid,command,power"]
         
         let outputPipe = Pipe()
         defer {

@@ -92,9 +92,16 @@ open class Module {
                 self._window = Window(
                     config: self.config,
                     widgets: self.menuBar.widgets,
-                    modulePreview: self.previewViewRef,
+                    // 传工厂而不是 self.previewViewRef / self.popupViewRef 本身：传实例会让这两个
+                    // 实参在调用 Window.init 时就被求值，等于「打开设置窗口」顺带把该模块的
+                    // Preview 与 Popup 两棵子树建出来。Popup 那棵因此推迟到用户真点到 Popup
+                    // 标签页，原因见 Window.init 上的注释。
+                    // 闭包用 [weak self]：否则 Module → _window → Window → 闭包 → Module 是个环。
+                    // 模块本身由 AppDelegate 的 modules 数组持有、和进程同寿，这个环实际漏不掉
+                    // 什么，但没有理由特意留一个。
+                    modulePreview: { [weak self] in self?.previewViewRef },
                     moduleSettings: self.settingsView,
-                    popupSettings: self.popupViewRef,
+                    popupSettings: { [weak self] in self?.popupViewRef },
                     notificationsSettings: self.notificationsView
                 )
             }
@@ -357,7 +364,15 @@ open class Module {
         if state {
             // 弹窗视图是懒建的，刚建出来还是空的。主动读一次，不然要等到下一个轮询周期
             // （最长一个间隔）才填上，头一两秒会显示空白。
-            self.readers.forEach { $0.read() }
+            // 必须放后台队列：这个回调来自 PopupViewController.viewWillAppear，是主线程。
+            // 有些 reader 的 read() 会 fork 子进程——蓝牙的 system_profiler 与 pmset 各自
+            // 有 10 秒超时，CPU 的 fork ps 和 uptime、Disk 的 ps 加 SMART 也不便宜。
+            // 在主线程同步跑这些，打开弹窗的瞬间界面就卡住，蓝牙最坏要卡 10 秒。
+            // 上游这里只有 Kit/module/reader.swift 的后台异步读，所以没有这个问题。
+            let readers = self.readers
+            DispatchQueue.global(qos: .userInitiated).async {
+                readers.forEach { $0.read() }
+            }
         }
     }
     

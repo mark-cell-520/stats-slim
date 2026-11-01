@@ -13,7 +13,9 @@ import Cocoa
 import Kit
 
 internal class Settings: NSStackView, Settings_v {
-    private var updateIntervalValue: Int = 3
+    // 与 Kit/module/reader.swift 的 defaultInterval 保持一致：Store 里没有对应键时
+    // （全新安装）reader 用的就是那个值，界面显示的数必须和它一样，见那里的说明。
+    private var updateIntervalValue: Int = 2
     private var hidState: Bool
     private var fanSpeedState: Bool = false
     private var fansSyncState: Bool = false

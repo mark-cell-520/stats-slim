@@ -43,7 +43,9 @@ You can use a combination of any of the variables.
 """
 
 internal class Settings: NSStackView, Settings_v, NSTextFieldDelegate {
-    private var updateIntervalValue: Int = 1
+    // 与 Kit/module/reader.swift 的 defaultInterval 保持一致：Store 里没有对应键时
+    // （全新安装）reader 用的就是那个值，界面显示的数必须和它一样，见那里的说明。
+    private var updateIntervalValue: Int = 2
     private var updateTopIntervalValue: Int = 1
     private var numberOfProcesses: Int = 8
     private var splitValueState: Bool = false

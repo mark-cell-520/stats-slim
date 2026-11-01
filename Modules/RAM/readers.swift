@@ -119,7 +119,10 @@ public class ProcessReader: Reader<[TopProcess]> {
     public override func setup() {
         self.popup = true
         self.preview = true
-        self.setInterval(Store.shared.int(key: "\(self.title)_updateTopInterval", defaultValue: 1))
+        // 上游默认 1 秒。macOS 的 top 本身就是个全系统采样器，单次约 0.3-1 秒 CPU，
+        // 弹窗或设置页开着时每小时 fork 3600 次。内存占用是慢变量，3 秒一次观感上没有差别。
+        // 用户在设置里改这个键即可覆盖（界面上的「Update interval」走的就是它）。
+        self.setInterval(Store.shared.int(key: "\(self.title)_updateTopInterval", defaultValue: 3))
     }
     
     public override func read() {

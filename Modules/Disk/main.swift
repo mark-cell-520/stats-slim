@@ -286,6 +286,9 @@ public class Disk: Module {
             // 「Update interval」，用户在界面上改完，两个都该跟着变（菜单栏带图表控件时
             // activityCallback 会把间隔压回 1，那时两个一起变，和上游行为一致）。
             self?.activityReader?.setInterval(value)
+            // 进程读数原来也钉在 1 秒，同一个设置项管不到它。它是三个里单 tick 最贵的
+            // （fork 一次 ps 再对每个进程各做一次 proc_pid_rusage），一起接上。
+            self?.processReader?.setInterval(value)
         }
         self.settingsView.setSMARTInterval = { [weak self] value in
             self?.smartReader?.setInterval(value)

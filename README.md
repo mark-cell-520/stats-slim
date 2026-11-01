@@ -129,6 +129,134 @@ WidgetsExtension 目标。桌面组件本身没有被删掉，它整套住在 Wi
 约 5–10 M。留着它的真正理由是让 app 与 11 个模块框架的依赖关系变干净，以及让上面
 第 1 项的懒加载不会连带触发 WidgetKit 那套东西。
 
+## 第五轮（2026-11-01）：全面审计与全局修复
+
+前四轮改的都是「已知的浪费」，这一轮是把整个代码base过一遍，把审计出来的问题一次修掉。
+25 个文件、约 390 行新增。分四类。
+
+### 1. 前几轮懒加载引入的三个缺陷（都会直接影响使用）
+
+· **Net 模块的定位授权按钮点了没反应。** `Modules/Net/main.swift` 原来在 `init` 里写
+  `self.popupView?.locationPermissionAction = {...}`，而 `popupView` 是
+  `self.livePopupView as? Popup`——不触发创建的那个访问器。弹窗视图改成懒建之后，
+  `init` 执行时它还是 `nil`，整条赋值被可选链短路掉，闭包从来没被装上。后果是弹窗里那颗
+  「允许访问 Wi-Fi 详情」按了什么都不发生，SSID、信道、协议永久空白，也跳不到系统设置的
+  定位面板。改到新增的 `popupViewDidLoad()` 钩子里补上（和 Sensors 同一个钩子）。
+· **GPU 与 Disk 的读取器有数据竞争，打开对应弹窗时可能崩。** `InfoReader.read()` 和
+  `SMARTReader.read()` 都在无锁的情况下 `append` / 下标写 / `sort self.list`。而 `read()`
+  现在有两个并发入口：`Kit/module/reader.swift` 的后台轮询，以及第三轮加进来的
+  「弹窗打开时主动读一次」（跑在后台队列上）。后台那次常常还没跑完，用户就点开了弹窗，
+  两边同时写同一个数组就是 Swift 排他性检查 trap 或者 COW 缓冲区踩踏。两个 reader 各加了
+  一把 `NSLock`，整段串行化（读取本身只有几毫秒）。
+· **打开弹窗时界面会卡住，蓝牙最坏 10 秒。** 上面说的那次主动读原来直接跑在主线程
+  （`PopupViewController.viewWillAppear` 调过来的）。蓝牙弹窗会 fork `system_profiler`
+  和 `pmset`，各自的超时是 10 秒；CPU 弹窗连 fork 三次 `ps`/`uptime`/`pmset`；Disk 弹窗
+  fork `ps` 加整轮 SMART。改成派发到后台队列，主线程不再等这些。
+
+### 2. 周期性开销（常驻程序的 CPU 主要就来自这里）
+
+· **Disk 进程读数是全书单 tick 最贵的一处，而用户完全无法调它的间隔。** 它原来在
+  `setup()` 里写死 `setInterval(1)`，于是设置界面里的「Update interval」对它不起作用
+  （`Reader.initStoreValues` 见 `interval` 非空就直接返回）。这一 tick 要 fork 一次
+  `ps -Aceo`，再对输出里每个进程各做一次 `proc_pid_rusage`。改成跟随用户选的那个间隔，
+  并接进 `Modules/Disk/main.swift` 的 `setInterval` 回调（那里已经接着容量读数和活动读数）。
+· **Disk 进程读数的快照字典无上限增长。** 它每 tick `var snapshot = self.list`，只往里面
+  写、从不删，ps 里已经消失的 PID 永远留着；macOS 的 PID 要涨到 99999 才回绕，于是这张表
+  随运行时间单调增长，是全工程唯一真正漏的结构。而且 Swift 字典是值类型，getter 返回后
+  第一次写入就整表 COW 拷贝，表越长这笔 memcpy 越贵。改成枚举结束时删掉不在本轮输出里的 key。
+· **Net 每 tick 向 configd 要二十几次主接口名。** `interfaceID` 的 getter 是
+  `Store.shared.string(key:defaultValue:)`，而 `defaultValue` 是普通参数不是 `@autoclosure`，
+  所以每次读它都会实跑一遍 `primaryInterface`——`SCDynamicStoreCopyValue` 向 configd 要一次
+  `State:/Network/Global/IPv4`，虚拟接口时还要再走 `physicalInterface()` 里的 `getifaddrs`。
+  而 `readInterfaceBandwidth()` 在 `getifaddrs` 的循环里对每个接口各读一次，一台机器上
+  二十来个接口。改成每 tick 开头解析一次、本 tick 内复用。
+· **Net 每 tick 为一百多个进程各建一个 `NSRunningApplication`，最后只留 8 个。**
+  `nettop -P` 把所有带 socket 的进程都列出来，而构造 `NSRunningApplication` 是一次到
+  loginwindow 的 XPC 往返。改成先用 nettop 输出的进程名，等排序和 `suffix()` 截断做完，
+  只给真正要显示的那几个换 `localizedName`。
+· **Sensors 弹窗关着的时候，每 tick 仍然唤醒主线程几十次。** `usageCallback` 是无条件
+  `DispatchQueue.main.async`，块里才判断 `window?.isVisible`。一台 M 机上 30-60 个传感器，
+  每个都建了 `LineChartView`，等于每 2 秒给一堆看不见的图表补点、全天不停，正好是 App Nap
+  最怕的形态。把可见性判断提到派发之前：已经渲染过就只更新缓存值，等弹窗真打开时
+  `appear()` 里的 `replay()` 一次性补上。
+· **Sensors 每 tick 把整张传感器表重算六遍。** 六个 `filter{}.map{}` 全表扫（每个都新建一个
+  100-200 元素的数组，元素还是装箱的存在值），加上本函数后面十几处
+  `firstIndex(where: { $0.key == "..." })` 的线性查找，最后再建一个 100-200 项的字典。
+  改成一趟循环同时做三件事：更新值、收集统计量、建一张 key → 下标的表；后面全部改成查表，
+  回写时也复用这张表。这些读数本身都是慢变量，为它们每 tick 反复全表重算是纯浪费。
+· **SMC 读全程持锁，把 18-36 万次内核 IPC 每小时整个串行化。** `SMC/smc.swift` 的 `read()`
+  原来把两次 `IOConnectCallStructMethod` 都罩在进程级单例锁里，而 Sensors 每 tick 读
+  50-100 个 key。CPU 的温度读数、GPU 的信息读数、电池的用电读数全排在 Sensors 后面。
+  重新划了锁的边界：**查元数据那一步留在锁内**（`Tests/SMC.swift` 的
+  `testConcurrentReadsShareMetadataCache` 明确要求 100 个并发读只问驱动一次，锁一放后面的
+  线程就会跟着 miss、跟着再问一遍），查到就立刻写进缓存，然后放锁；**每个 tick 都发生的
+  读数据那一步移到锁外**。这个边界是先按「只保护字典」改了一版、被那个测试逮回来之后才定下来的。
+· **所有 reader 的定时器相位完全一致，每次休眠唤醒都是一次惊群。** `Repeater` 的 deadline
+  都是 `now + interval`，而所有 reader 的定时器都在启动后几毫秒内相继建立。唤醒后
+  repeating 定时器全部变成「已过期」，约 12 个常驻 reader 会在 200 毫秒的 leeway 里同时补跑。
+  给首次触发加一个 `[0, interval)` 的随机偏移，稳态周期不变；需要严格对齐秒边界的调用方
+  （`Reader.alignToSecondBoundary`）不抖。
+· **电池弹窗的 `top` 每次采两遍全系统。** `-l 2` 让 top 采两次样本再输出，每次约 0.3-0.6 秒
+  CPU、1-2 秒墙钟，而这个 reader 的间隔是 2 秒，弹窗开着时等于让 top 背靠背地跑。
+  这里要的只是 `power` 那一列的瞬时值，一次采样就够，改成 `-l 1`。
+· **RAM 弹窗的 `top` 默认 1 秒一次。** `updateTopInterval` 默认 1，而 macOS 的 `top` 本身就是
+  个全系统采样器，单次约 0.3-1 秒 CPU。改成 3，用户在设置里改这个键即可覆盖。
+· **蓝牙每 tick 全量枚举一次已配对设备。** `IOBluetoothDevice.pairedDevices()` 单次几十毫秒，
+  而这个 reader 跟随模块间隔（默认 2 秒）。已配对设备列表半天才变一次，加了个 30 秒 TTL，
+  和旁边 `profilerCache` / `pmsetCache` 一个写法。
+
+### 3. 启动时常驻内存
+
+· **合并视图的弹窗启动时就建。** `Stats/Views/CombinedView.swift` 的 `init` 无条件
+  `PopupWindow(title:view:Popup())`，而 `CombinedModules` 默认是关的——关着的时候用户永远看不到
+  这个弹窗，却照样在启动时建出一个 NSWindow 加 NSScrollView + NSVisualEffectView，还把 9 个
+  模块的 portal 全挂成子视图。改成懒建，和 `Module` 的 `window` / `popup` 同一个套路。
+· **打开某个模块的设置窗口，会顺带把它的 Preview 与 Popup 两棵子树建出来。**
+  `Module.window` 的 getter 把 `self.previewViewRef` / `self.popupViewRef` 作为实参传给
+  `Window.init`，传实例就等于在调用时求值。Popup 那棵只在用户真点到 Popup 标签页时才用得上
+  （`loadPopupSettings()` 的调用点在 `tabView.view` 的惰性闭包里）。改成传工厂闭包，Popup
+  子树推迟到第一次显示那个标签页。对 Sensors 还顺带避开一件事：`popupViewDidLoad()` 会
+  提前给每个 FanView 发一遍 `setFanMode` / `setSpeed` 的 SMC XPC。
+  Preview 那棵没有推迟空间——它默认就顶着设置界面显示，见 `Window.preview()`。
+· **60 张只在设置窗口出现的预览图，从启动活到退出。** `widget_t.new()` 为每个模块的每种
+  控件各建一张 `NSImage`（10 个模块共 60 个控件类型），每张都是一个 NSPDFImageRep 加一份
+  解析后的 CGPDFDocument。改成只存 `dataWithPDF` 出来的字节，访问时才解，窗口关掉就释放。
+  没有在 SWidget 里缓存解出来的图，也没有连 preview 视图一起存——后者会把 60 棵预览视图树
+  留在内存里，比这 60 张图贵得多，正好和前三轮的懒加载反着来。
+
+### 4. 两处会给出错误答案的缺陷，和一个跑不起来的测试目标
+
+· **`isNewestVersion` 在 beta 对 beta 时永远返回 true。** 三个分支的公共条件写成了
+  `latest.patch >= current.patch`，于是「当前 beta2、最新 beta1」也告诉用户有新版本，
+  甚至「当前 beta1、最新 beta1」每次启动都弹一次更新。重写成按
+  (major, minor, patch, beta) 依次比，并且加了一条上游没有的规则：最新版是 beta 而当前版
+  不是 → 不算有新版本（不能把稳定版用户往 beta 上推）。
+· **设置界面显示的间隔和实际跑的不是一回事。** `Reader.defaultInterval` 第二轮从 1 改成了 2，
+  但各模块 Settings 视图里 `updateIntervalValue` 的初值没跟着改：全新安装下 CPU/GPU/RAM
+  实际 2 秒而界面显示 1 秒、Sensors 实际 2 秒显示 3 秒、Disk 实际 2 秒显示 10 秒、
+  Net 的 ICMP 实际 30 秒显示 1 秒。五处初值都对齐到实际值，并在 `defaultInterval` 上写了注释
+  说明这两处必须同步。
+· **Tests 目标从建库起就编不过，仓库里其他测试一个都跑不了。** `Tests/Disk.swift` 调了
+  `drive(uuid:BSDName:)`，而 `drive` 只有一个 public 的 `init(size:free:)`。因为整个目标编不过，
+  Kit / RAM / Bluetooth / Disk 的其余测试从来没在 CI 里跑过（CI 只有 `linter`、`build`、
+  `release`、`smc-tests` 四条工作流，没有一条跑它）。改成先建再赋值，测试要表达的意思不变。
+  修好之后这个目标第一次真正跑起来：25 个测试，其中 `testIsNewestVersion_beta` 红了 2 条，
+  就是上面那个 beta 比较 bug。
+
+### 这一轮验证到什么程度
+
+· Xcode Tests 目标 25 个测试全过（修好之后才第一次能跑）。
+· `make test-smc` 166 个测试全过（intel 76 + arm64 90）。SMC 锁边界那版改动是先被
+  `testConcurrentReadsShareMetadataCache` 逮住、退回重做才过的。
+· Release 构建 0 error，产物是通用二进制（x86_64 + arm64），版本校验通过，zip 9.09 MB。
+· 上面每一项都在代码注释里写了文件位置、原因和回退方法，可以单独回退。
+
+**没有验证到的**：这一轮没有重新测内存与 CPU 的绝对值，上面凡是提到量级的地方都写的是
+「频率」和「每次的代价」，不是实测的占用变化。Sensors `read()` 的重写是靠编译加逐行比对
+  语义保证的，没有为它写测试——它的输入是 SMC 与 IOKit，仓库现有的测试手法（
+  `Kit/scripts/run-smc-tests.py` 那套「一次性源码副本 + 替换系统调用边界」）要mock的边界太多，
+  这一轮没有搭。安装与发布的注意事项见下面「安装」一节。
+
 ## 安装
 
 ### 下载即用

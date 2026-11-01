@@ -702,56 +702,30 @@ public func isNewestVersion(currentVersion: String, latestVersion: String) -> Bo
         }
     }
     
-    // current is not beta + latest is not beta
-    if current.beta == nil && latest.beta == nil {
-        if latest.major > current.major {
-            return true
-        }
-        
-        if latest.minor > current.minor && latest.major >= current.major {
-            return true
-        }
-        
-        if latest.patch > current.patch && latest.minor >= current.minor && latest.major >= current.major {
-            return true
-        }
+    // 判定规则，按优先级：
+    // 1. 最新版是 beta 而当前版不是 → 不算有新版本。不能把稳定版用户往 beta 上推。
+    // 2. 否则按 (major, minor, patch) 依次比，第一个不同的定胜负。
+    // 3. 版本号完全相同时，正式版算作比同号的 beta 新（发布版取代自己的预发布版），
+    //    所以 beta 用户能看到对应的正式版；两个都是 beta 时才算 beta 号。
+    //
+    // 上游是三个分支各写一遍，公共条件写成了 latest.patch >= current.patch，于是 beta 对 beta
+    // 时第三行就先命中返回 true，根本走不到比较 beta 号那一行——「当前 beta2、最新 beta1」
+    // 也告诉用户有新版本，甚至「当前 beta1、最新 beta1」每次启动都弹一次更新。
+    // Tests/Kit.swift 的 testIsNewestVersion_beta 第 27、28 两行逮的就是这个。
+    if latest.beta != nil && current.beta == nil {
+        return false
     }
-    
-    // current version is beta + last version is not beta
-    if current.beta != nil && latest.beta == nil {
-        if latest.major > current.major {
-            return true
-        }
-        
-        if latest.minor > current.minor && latest.major >= current.major {
-            return true
-        }
-        
-        if latest.patch >= current.patch && latest.minor >= current.minor && latest.major >= current.major {
-            return true
-        }
+
+    if latest.major != current.major { return latest.major > current.major }
+    if latest.minor != current.minor { return latest.minor > current.minor }
+    if latest.patch != current.patch { return latest.patch > current.patch }
+
+    switch (current.beta, latest.beta) {
+    case (nil, nil): return false
+    case (_, nil): return true
+    case (let currentBeta?, let latestBeta?): return latestBeta > currentBeta
+    default: return false
     }
-    
-    // current version is beta + last version is beta
-    if current.beta != nil && latest.beta != nil {
-        if latest.major > current.major {
-            return true
-        }
-        
-        if latest.minor > current.minor && latest.major >= current.major {
-            return true
-        }
-        
-        if latest.patch >= current.patch && latest.minor >= current.minor && latest.major >= current.major {
-            return true
-        }
-        
-        if latest.beta! > current.beta! && latest.patch >= current.patch && latest.minor >= current.minor && latest.major >= current.major {
-            return true
-        }
-    }
-    
-    return false
 }
 
 public func showNotification(title: String, subtitle: String? = nil, userInfo: [AnyHashable: Any] = [:], delegate: UNUserNotificationCenterDelegate? = nil) -> String {

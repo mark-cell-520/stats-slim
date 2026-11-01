@@ -75,7 +75,15 @@ class DiskTests: XCTestCase {
     }
     
     func testDiskOldCachedDriveIgnoresRegistryHandle() throws {
-        let data = try JSONEncoder().encode(drive(uuid: "volume", BSDName: "disk10s1"))
+        // drive 只有一个 public 的 init(size:free:)，uuid 与 BSDName 是内部存储属性。
+        // 这里原来写的是 drive(uuid:BSDName:)，编不过，把整个 Tests 目标一起挡了下来
+        // （Kit / RAM / Bluetooth / Disk 的其余测试因此一个都跑不了）。改用 @testable import
+        // 拿到的内部访问权，先建再赋值，测试要表达的意思不变。
+        var cached = drive(size: 1, free: 0)
+        cached.uuid = "volume"
+        cached.BSDName = "disk10s1"
+
+        let data = try JSONEncoder().encode(cached)
         var object = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
         object["parent"] = 123
         let decoded = try JSONDecoder().decode(drive.self, from: JSONSerialization.data(withJSONObject: object))

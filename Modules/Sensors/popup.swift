@@ -186,13 +186,28 @@ internal class Popup: PopupWrapper {
     }
     
     internal func usageCallback(_ values: [Sensor_p]) {
+        // 可见性判断必须放在派发之前。上游这里是无条件 DispatchQueue.main.async，块里再判断
+        // window?.isVisible：于是一个 tick 里给几十个传感器图表各补一个点、跑一遍 apply，
+        // 全程在主线程上，而弹窗关着的时候这些图表一个都看不见。每 2 秒几十次主线程唤醒、
+        // 全天不停，正好是 App Nap 最怕的那种形态。
+        // 已经初始化过就不再派发，只把最新值写进缓存；等弹窗真打开时 appear() 里的 replay()
+        // 会一次性补上（见 Modules/Sensors/popup.swift 的 appear）。首次还没渲染过时仍然照常
+        // 派发，保证第一次打开就有内容。
+        let visible = self.window?.isVisible ?? false
+        guard visible || !self.sensorsCache.initialized else {
+            self.sensorsCache.value = values
+            return
+        }
+
         DispatchQueue.main.async(execute: {
-            values.filter({ $0 is Sensor }).forEach { (s: Sensor_p) in
-                if let sensor = self.list[s.key] as? SensorView {
-                    sensor.addHistoryPoint(s)
+            if self.window?.isVisible ?? false {
+                values.filter({ $0 is Sensor }).forEach { (s: Sensor_p) in
+                    if let sensor = self.list[s.key] as? SensorView {
+                        sensor.addHistoryPoint(s)
+                    }
                 }
             }
-            
+
             self.sensorsCache.apply(values, visible: self.window?.isVisible ?? false, render: self.renderSensors)
         })
     }

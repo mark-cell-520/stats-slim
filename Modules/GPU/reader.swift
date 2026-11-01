@@ -45,6 +45,13 @@ internal class InfoReader: Reader<GPUs> {
     private var displays: [gpu_s] = []
     private var devices: [device] = []
 
+    // read() 会改 self.gpus.list（append / 下标写 / sort），而这个方法有两个并发入口：
+    // Kit/module/reader.swift 的后台轮询，以及 Kit/module/module.swift 弹窗打开时那次主动读
+    // （第三轮加进来的，跑在 userInitiated 后台队列上）。两者几乎必然重叠——后台那次常常还没
+    // 跑完，用户就点开了弹窗。没有锁就是 Swift 排他性检查 trap 或者 COW 缓冲区踩踏，
+    // 表现是打开 GPU 弹窗时偶发崩溃。整段串行化，读取本身只有几毫秒，代价可以忽略。
+    private let readLock = NSLock()
+
     private var aneChannels: CFMutableDictionary? = nil
     private var aneSubscription: IOReportSubscriptionRef? = nil
     private var previousANEEnergy: Double = 0
@@ -100,6 +107,9 @@ internal class InfoReader: Reader<GPUs> {
     }
     
     public override func read() {
+        self.readLock.lock()
+        defer { self.readLock.unlock() }
+
         guard let accelerators = fetchIOService(kIOAcceleratorClassName) else {
             return
         }

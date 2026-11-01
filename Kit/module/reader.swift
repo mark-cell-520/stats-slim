@@ -57,6 +57,10 @@ open class Reader<T: Codable>: NSObject, ReaderInternal_p {
     // 上游默认 1 秒。菜单栏这类常驻程序，读取器的唤醒频率就是 CPU 占用的主要来源，
     // 1 秒和 2 秒在观感上没有区别，但整机的轮询次数直接减半。每个模块仍可在设置里改回 1。
     public var defaultInterval: Int = 2
+    // 注意：initStoreValues 在 Store 里没有 `<模块名>_updateInterval` 这个键时用的就是这个值，
+    // 也就是「全新安装」的实际间隔。各模块 Settings 视图里那个 `updateIntervalValue` 的初值
+    // 必须和它保持一致，否则界面上显示的数字与实际跑的不是一回事（前几轮就吃过这个亏：
+    // 实际 2 秒、界面显示 1 秒，读者会以为改动没生效）。改动这里时同步改 Modules/*/settings.swift。
     public var popup: Bool = false
     public var preview: Bool = false
     public var sleep: Bool = false
@@ -239,7 +243,7 @@ open class Reader<T: Codable>: NSObject, ReaderInternal_p {
             debug("Set up update interval: \(Int(interval)) sec", log: self.log)
         }
         
-        self.repeatTask = Repeater(seconds: Int(interval)) { [weak self] in
+        self.repeatTask = Repeater(seconds: Int(interval), aligned: self.alignToSecondBoundary) { [weak self] in
             self?.read()
         }
     }
@@ -257,7 +261,7 @@ open class Reader<T: Codable>: NSObject, ReaderInternal_p {
             guard let self, self.alignGeneration == generation, self.repeatTask == nil else { return }
 
             DispatchQueue.global(qos: .background).async { self.read() }
-            self.repeatTask = Repeater(seconds: Int(interval)) { [weak self] in
+            self.repeatTask = Repeater(seconds: Int(interval), aligned: self.alignToSecondBoundary) { [weak self] in
                 self?.read()
             }
             self.repeatTask?.start()

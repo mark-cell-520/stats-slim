@@ -42,9 +42,9 @@ open class Window: NSStackView {
     private var segmentedControl: NSSegmentedControl?
     private var tabView: NSTabView?
     
-    private var modulePreview: PreviewWrapper?
+    private var modulePreviewFactory: (() -> PreviewWrapper?)?
     private var moduleSettings: Settings_v?
-    private var popupSettings: Popup_p?
+    private var popupSettingsFactory: (() -> Popup_p?)?
     private var notificationsSettings: NotificationsWrapper?
     
     private var moduleSettingsContainer: NSStackView?
@@ -74,19 +74,27 @@ open class Window: NSStackView {
     private var previewView: NSView? = nil
     private var settingsView: NSView? = nil
     
+    // modulePreview 与 popupSettings 收工厂闭包而不是视图实例。这两个参数在 Module.window
+    // 的 getter 里是以 `self.previewViewRef` / `self.popupViewRef` 的形式做实参传进来的，
+    // 传实例就等于在「打开设置窗口」这个动作里把该模块的 Preview 与 Popup 两棵子树立刻建出来
+    // ——Popup 那棵尤其不该：它只在用户真的点到 Popup 标签页时才用得上（下面 loadPopupSettings
+    // 的调用点在 tabView.view 的惰性闭包里）。对 Sensors 还会顺带触发 popupViewDidLoad()，
+    // 提前给每个 FanView 发一遍 setFanMode / setSpeed 的 SMC XPC。
+    // 传闭包之后，Popup 子树推迟到第一次显示 Popup 标签页；Preview 仍是在 Window 建好时就要
+    // （见下面 preview()，它默认就顶着设置界面显示），这一棵没有推迟空间。
     init(
         config: module_c,
         widgets: [SWidget],
-        modulePreview: PreviewWrapper?,
+        modulePreview: @escaping () -> PreviewWrapper?,
         moduleSettings: Settings_v?,
-        popupSettings: Popup_p?,
+        popupSettings: @escaping () -> Popup_p?,
         notificationsSettings: NotificationsWrapper?
     ) {
         self.config = config
         self.widgets = widgets
-        self.modulePreview = modulePreview
+        self.modulePreviewFactory = modulePreview
         self.moduleSettings = moduleSettings
-        self.popupSettings = popupSettings
+        self.popupSettingsFactory = popupSettings
         self.notificationsSettings = notificationsSettings
         
         self.isPreviewAvailable = config.previewConfig["available"] as? Bool ?? false
@@ -134,7 +142,7 @@ open class Window: NSStackView {
     }
     
     private func preview() -> NSView? {
-        guard let v = self.modulePreview else { return nil }
+        guard let v = self.modulePreviewFactory?() else { return nil }
         
         let scrollView: ScrollableStackView = ScrollableStackView()
         scrollView.stackView.edgeInsets = NSEdgeInsets(
@@ -302,8 +310,8 @@ open class Window: NSStackView {
     
     private func loadPopupSettings() {
         self.popupSettingsContainer?.subviews.forEach{ $0.removeFromSuperview() }
-        
-        if let settingsView = self.popupSettings, let view = settingsView.settings() {
+
+        if let settingsView = self.popupSettingsFactory?(), let view = settingsView.settings() {
             self.popupSettingsContainer?.addArrangedSubview(view)
         } else {
             self.popupSettingsContainer?.addArrangedSubview(self.noPopupSettingsView)

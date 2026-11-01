@@ -33,6 +33,7 @@ public enum widget_t: String {
         guard let widgetConfig: NSDictionary = config[self.rawValue] as? NSDictionary else { return nil }
         
         var image: NSImage? = nil
+        var pdfData: Data? = nil
         var preview: widget_p? = nil
         var item: widget_p? = nil
         
@@ -83,6 +84,7 @@ public enum widget_t: String {
             preview = IconWidget(title: module, config: widgetConfig, icon: icon, preview: true)
             item = IconWidget(title: module, config: widgetConfig, icon: icon, preview: false)
             image = icon?.withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 14, weight: .regular)) ?? icon
+            pdfData = image?.tiffRepresentation
         default: break
         }
         
@@ -121,11 +123,13 @@ public enum widget_t: String {
                 width: width - view.frame.origin.x,
                 height: view.bounds.height
             )
-            image = NSImage(data: view.dataWithPDF(inside: r))
+            // dataWithPDF 出来的是 PDF 字节；解成 NSImage 这一步挪到 SWidget.image 里做（见那里的
+            // 说明），这里只把字节传下去。上面的 if image == nil 仍然负责让 .icon 分支走不到这儿。
+            pdfData = view.dataWithPDF(inside: r)
         }
         
-        if let item = item, let image = image {
-            return SWidget(self, defaultWidget: defaultWidget, module: module, item: item, image: image)
+        if let item = item, let pdfData = pdfData {
+            return SWidget(self, defaultWidget: defaultWidget, module: module, item: item, image: pdfData)
         }
         
         return nil
@@ -240,7 +244,20 @@ public class SWidget {
     public let type: widget_t
     public let defaultWidget: widget_t
     public let module: String
-    public let image: NSImage
+    // 设置界面与欢迎页里用的那张预览图。上游在 widget_t.new() 里就把 NSImage 建好存下来，
+    // 于是启动时为每个模块的每种控件各建一张（10 个模块共 60 个控件类型），每张都是一个
+    // NSPDFImageRep 加一份解析后的 CGPDFDocument，跟着进程活到退出——而它只在设置窗口和
+    // 欢迎页里被看到一两次。改成只存 PDF 字节，每次访问时才解，解析完交给 NSImageView，
+    // 窗口关掉就跟着释放，常驻内存从 60 张图变成 60 小段数据。
+    // 注意一：不能改成连 preview 视图一起存着、等要用时再渲染——那会把 60 棵预览视图树整个
+    // 留在内存里，比这 60 张图贵得多，正好和前三轮的懒加载反着来。
+    // 注意二：也不要在 SWidget 里缓存解出来的 NSImage，那就又活回进程生命周期了。访问点只有
+    // Kit/module/window.swift 的 loadWidgetSettings() 与 WidgetSelectorView.init()、以及
+    // Stats/Views/Setup.swift 的 widgetImage()，全是设置/欢迎窗口搭起来时的一次性调用。
+    private let imageData: Data
+    public var image: NSImage {
+        NSImage(data: self.imageData) ?? NSImage()
+    }
     public var item: widget_p
     
     public var isActive: Bool {
@@ -280,12 +297,12 @@ public class SWidget {
     private var menuBarItem: NSStatusItem? = nil
     private var originX: CGFloat
     
-    public init(_ type: widget_t, defaultWidget: widget_t, module: String, item: widget_p, image: NSImage) {
+    public init(_ type: widget_t, defaultWidget: widget_t, module: String, item: widget_p, image: Data) {
         self.type = type
         self.module = module
         self.item = item
         self.defaultWidget = defaultWidget
-        self.image = image
+        self.imageData = image
         self.originX = item.frame.origin.x
         
         self.item.widthHandler = { [weak self] in

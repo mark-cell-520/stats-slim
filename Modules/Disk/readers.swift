@@ -436,14 +436,18 @@ public class ProcessReader: Reader<[Disk_process]> {
     public override func setup() {
         self.popup = true
         self.preview = true
-        self.setInterval(1)
+        // 上游把这里钉死在 1 秒。它弹窗/设置页开着时每小时 fork 一次 ps 并对每个进程各做一次
+        // proc_pid_rusage，是全书单 tick 最贵的一处，而读数（磁盘读写速率）间隔长一点照样准。
+        // 改成跟随用户在设置里选的那个间隔，与容量读数、活动读数共用同一个键
+        // （设置界面对它的接线在 Modules/Disk/main.swift 的 setInterval 回调里）。
     }
-    
+
     public override func read() {
         guard self.numberOfProcesses != 0, let output = runProcess(path: "/bin/ps", args: ["-Aceo pid,args", "-r"]) else { return }
-        
+
         var snapshot = self.list
         var processes: [Disk_process] = []
+        var livePIDs = Set<Int32>()
         output.enumerateLines { (line, _) in
             let str = line.trimmingCharacters(in: .whitespaces)
             let pidFind = str.findAndCrop(pattern: "^\\d+")
@@ -475,7 +479,13 @@ public class ProcessReader: Reader<[Disk_process]> {
             
             snapshot[pid]?.read = bytesRead
             snapshot[pid]?.write = bytesWritten
+            livePIDs.insert(pid)
         }
+        // 上一轮还在、这一轮 ps 里已经找不到的进程，要从快照里删掉。上游只往 snapshot 里写、
+        // 从不删，于是这张表随运行时间单调增长（macOS 的 PID 要涨到 99999 才回绕），是全书
+        // 唯一真正无上限增长的结构；而且 Swift 字典是值类型，getter 返回后第一次写入就整表
+        // COW 拷贝，表越长这笔每秒一次的 memcpy 越贵。
+        snapshot = snapshot.filter { livePIDs.contains($0.key) }
         self.list = snapshot
         
         processes.sort {
@@ -517,7 +527,13 @@ private func runProcess(path: String, args: [String] = []) -> String? {
 
 internal class SMARTReader: Reader<Disks> {
     internal var list: Disks = Disks()
-    
+
+    // read() 会 remove(at:) / append / sort self.list，还会改 smartTotals 与
+    // smartEnableAttempted。它有两个并发入口：30 秒的后台轮询，以及弹窗打开时那次主动读
+    // （第三轮加的，跑在后台队列上）。SMART 轮询恰好是 30 秒一次，用户点开 Disk 弹窗时
+    // 正好撞上的概率不低，没有锁就是排他性检查 trap 或越界。整段串行化。
+    private let readLock = NSLock()
+
     private var SMART: Bool {
         Store.shared.bool(key: "\(ModuleType.disk.stringValue)_SMART", defaultValue: true)
     }
@@ -533,6 +549,9 @@ internal class SMARTReader: Reader<Disks> {
     }
     
     public override func read() {
+        self.readLock.lock()
+        defer { self.readLock.unlock() }
+
         guard self.SMART else { return }
         
         let keys: [URLResourceKey] = [.volumeNameKey]

@@ -211,11 +211,10 @@ public class Network: Module {
         )
         guard self.available else { return }
         
+        // 弹窗视图是懒建的，此刻还没建出来，下面这行必须等 popupViewDidLoad() 里再做——
+        // 在这里写等于对着 nil 赋值，闭包整条被可选链短路掉（见该钩子里的说明）。
         self.usageReader = UsageReader(.network) { [weak self] value in
             self?.usageCallback(value)
-        }
-        self.popupView?.locationPermissionAction = { [weak self] in
-            self?.usageReader?.requestWiFiLocationAuthorization()
         }
         self.processReader = ProcessReader(.network) { [weak self] value in
             if let list = value {
@@ -257,11 +256,21 @@ public class Network: Module {
         }
         
         self.setReaders([self.usageReader, self.processReader, self.connectivityReader])
-        
+
         self.setIPUpdater()
         self.setUsageReset()
     }
-    
+
+    public override func popupViewDidLoad() {
+        // 上游在 init 里就把这行赋值做完，那时弹窗视图是 init 时一次性建好的。改成懒建之后
+        // init 里 self.popupView 还是 nil，赋值会被可选链整条短路，用户点弹窗里那颗
+        // 「允许访问 Wi-Fi 详情」按钮什么都不会发生（SSID、信道、协议永久空白）。
+        // 改到视图第一次建好时补上，与 Sensors 的做法一致。
+        self.popupView?.locationPermissionAction = { [weak self] in
+            self?.usageReader?.requestWiFiLocationAuthorization()
+        }
+    }
+
     public override func isAvailable() -> Bool {
         var list: [String] = []
         for interface in SCNetworkInterfaceCopyAll() as NSArray {

@@ -43,12 +43,17 @@ internal class DevicesReader: Reader<[BLEDevice]>, CBCentralManagerDelegate, CBP
     
     private var profilerCache: (ts: Date, value: ([bleDevice], [String]))? = nil
     private var pmsetCache: (ts: Date, value: [bleDevice])? = nil
+    private var pairedDevicesCache: (ts: Date, value: [ioDevice])? = nil
     // 这两个缓存 TTL 决定 fork 子进程的频率：system_profiler 与 pmset 各被 fork 一次。
     // 上游 30 秒 / 10 秒，而读出来的只是外设电量，本地也没有控件在显示它（Bluetooth_widget
     // 为空串）时纯属白发。缓存延长后每小时 fork 数从 480 降到 120，电量读数最多晚一分钟，
     // 对「AirPods 还剩多少电」这种量级完全够用。
     private let profilerTTL: TimeInterval = 60
     private let pmsetTTL: TimeInterval = 30
+    // IOBluetoothDevice.pairedDevices() 是对整个蓝牙栈的全量枚举，单次就要几十毫秒，
+    // 而 read() 每个 tick 都调一次（这个 reader 没有独立的间隔设置项，跟随模块间隔，
+    // 默认 2 秒，弹窗开着时每小时 1800 次）。已配对的设备列表半天才会变一次，加个 TTL。
+    private let pairedDevicesTTL: TimeInterval = 30
     
     static let batteryServiceUUID = CBUUID(string: "0x180F")
     static let batteryCharacteristicsUUID = CBUUID(string: "0x2A19")
@@ -133,18 +138,7 @@ internal class DevicesReader: Reader<[BLEDevice]>, CBCentralManagerDelegate, CBP
             }
         }
         
-        let pairedDevices: [ioDevice] = IOBluetoothDevice.pairedDevices()?.compactMap({
-            if let device = $0 as? IOBluetoothDevice, device.isPaired() || device.isConnected() {
-                return ioDevice(
-                    name: device.nameOrAddress,
-                    address: device.addressString,
-                    rssi: device.rssi(),
-                    isConnected: device.isConnected(),
-                    isPaired: device.isPaired()
-                )
-            }
-            return nil
-        }) ?? []
+        let pairedDevices: [ioDevice] = self.cachedPairedDevices()
         
         let snapshot: [BLEDevice] = self.stateQueue.sync {
             self.devices = self.devices.filter { (d: BLEDevice) in
@@ -384,6 +378,26 @@ internal class DevicesReader: Reader<[BLEDevice]>, CBCentralManagerDelegate, CBP
         }
         let value = self.fetchPmsetAccessoryLevels()
         self.stateQueue.sync { self.pmsetCache = (Date(), value) }
+        return value
+    }
+
+    private func cachedPairedDevices() -> [ioDevice] {
+        if let cache = self.stateQueue.sync(execute: { self.pairedDevicesCache }), Date().timeIntervalSince(cache.ts) < self.pairedDevicesTTL {
+            return cache.value
+        }
+        let value: [ioDevice] = IOBluetoothDevice.pairedDevices()?.compactMap({
+            if let device = $0 as? IOBluetoothDevice, device.isPaired() || device.isConnected() {
+                return ioDevice(
+                    name: device.nameOrAddress,
+                    address: device.addressString,
+                    rssi: device.rssi(),
+                    isConnected: device.isConnected(),
+                    isPaired: device.isPaired()
+                )
+            }
+            return nil
+        }) ?? []
+        self.stateQueue.sync { self.pairedDevicesCache = (Date(), value) }
         return value
     }
     
