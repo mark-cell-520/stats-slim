@@ -92,9 +92,9 @@ open class Module {
                 self._window = Window(
                     config: self.config,
                     widgets: self.menuBar.widgets,
-                    modulePreview: self.previewView,
+                    modulePreview: self.previewViewRef,
                     moduleSettings: self.settingsView,
-                    popupSettings: self.popupView,
+                    popupSettings: self.popupViewRef,
                     notificationsSettings: self.notificationsView
                 )
             }
@@ -110,25 +110,94 @@ open class Module {
         set { Store.shared.set(key: "\(self.name)_position", value: newValue) }
     }
     public var userDefaults: UserDefaults? = UserDefaults(suiteName: "\(Bundle.main.object(forInfoDictionaryKey: "TeamId") as! String).eu.exelban.Stats.widgets")
-    
-    public var popupKeyboardShortcut: [UInt16] { self.popupView?.keyboardShortcut ?? [] }
-    
+
+    // 弹窗快捷键直接从 Store 读，不从弹窗视图上取。Stats/helpers.swift 的 handleKeyEvent 会在
+    // 每次按键时遍历所有模块比对这个值，而弹窗视图现在是懒建的——从视图上取会把所有模块的
+    // 弹窗一次性全部建出来，正好把这项优化抵消掉。PopupWrapper 本来就以 Store 为准
+    // （init 时读、setKeyboardShortcut 时写），所以这里读 Store 与读视图等价。
+    public var popupKeyboardShortcut: [UInt16] {
+        Store.shared.array(key: "\(self.config.name)_popup_keyboardShortcut", defaultValue: []) as? [UInt16] ?? []
+    }
+
     private var moduleType: ModuleType
-    
+
     private var settingsView: Settings_v? = nil
+    private var notificationsView: NotificationsWrapper? = nil
+
+    // 弹窗视图与预览页都是「用户点开才需要」的东西，上游却在模块 init 里就把整棵子树建出来：
+    // Popup 子类在 init 里铺仪表盘、图表、详情、平均负载、进程列表，Preview 子类在 init 里铺
+    // 十几行预览字段。10 个模块这两棵合计实测约 7-10M，而弹窗和设置窗口对绝大多数模块来说
+    // 整个会话都不会打开一次。改成只存工厂，第一次用到时才建。
+    // 设置页（Settings）与通知页（Notifications）刻意不动：Settings 的行是在 load(widgets:)
+    // 里铺的、init 本身几乎不花钱，Notifications 的 init 只建几个通知 id，懒化它们没有收益，
+    // 只会多两条要维护的路径。Portal 也不能懒化——Stats/Views/CombinedView.swift 要用
+    // `m.portal != nil` 判断模块能不能进合并视图，懒了会全都判成不能进。
+    private var popupViewFactory: (() -> Popup_p?)?
+    private var previewViewFactory: (() -> PreviewWrapper?)?
+    private var _popupView: Popup_p? = nil
+    private var _previewView: PreviewWrapper? = nil
+    // 这两棵视图改成启动后按需创建，写入发生在主线程（Module 自己的 window / popup getter
+    // 都只在主线程被访问），但模块的读取器回调会在后台线程读它们。上游这里是 init 时一次性
+    // 赋值的 let，怎么读都安全；现在多了一次运行期写入，就得加锁，否则后台线程可能读到
+    // 赋值过程中的中间状态。锁只在创建时走一次，之后每次回调都是一次无竞争的 lock/unlock。
+    private let lazyViewsLock = NSLock()
+
+    /// 弹窗视图，第一次访问时创建。只给 Module 自己的 window / popup getter 用。
+    public var popupViewRef: Popup_p? {
+        self.lazyViewsLock.lock()
+        var created = false
+        if self._popupView == nil, let factory = self.popupViewFactory {
+            self._popupView = factory()
+            created = true
+        }
+        let view = self._popupView
+        self.lazyViewsLock.unlock()
+        // 钩子放在锁外调用：Sensors 的 popupViewDidLoad 会回头读 popupView，放锁内会死锁。
+        if created { self.popupViewDidLoad() }
+        return view
+    }
+    /// 已经建好的弹窗视图，不触发创建。模块的读取器回调走这个：弹窗没打开时，没必要为了
+    /// 更新一个看不见的界面而把整套视图建出来。
+    public var livePopupView: Popup_p? {
+        self.lazyViewsLock.lock()
+        defer { self.lazyViewsLock.unlock() }
+        return self._popupView
+    }
+    /// 懒建的弹窗视图第一次建好时调用，让模块有机会往里填数据。Sensors 靠它把传感器列表
+    /// 送进弹窗——它原来在 init 里就调一次 setup()，那会把懒建出来的视图立刻建回去。
+    open func popupViewDidLoad() {}
+
+    /// 预览页，第一次访问时创建。只给 Module 自己的 window getter 用。
+    public var previewViewRef: PreviewWrapper? {
+        self.lazyViewsLock.lock()
+        var created = false
+        if self._previewView == nil, let factory = self.previewViewFactory {
+            self._previewView = factory()
+            created = true
+        }
+        let view = self._previewView
+        self.lazyViewsLock.unlock()
+        if created { self.previewViewDidLoad() }
+        return view
+    }
+    /// 已经建好的预览页，不触发创建。
+    public var livePreviewView: PreviewWrapper? {
+        self.lazyViewsLock.lock()
+        defer { self.lazyViewsLock.unlock() }
+        return self._previewView
+    }
+    open func previewViewDidLoad() {}
+
     private var _popup: PopupWindow? = nil
     private var popup: PopupWindow? {
         get {
             if self._popup == nil {
-                self._popup = PopupWindow(title: self.config.name, module: self.moduleType, view: self.popupView, visibilityCallback: self.popupVisibilityCallback)
+                self._popup = PopupWindow(title: self.config.name, module: self.moduleType, view: self.popupViewRef, visibilityCallback: self.popupVisibilityCallback)
             }
             return self._popup
         }
         set { self._popup = newValue }
     }
-    private var popupView: Popup_p? = nil
-    private var notificationsView: NotificationsWrapper? = nil
-    private var previewView: PreviewWrapper? = nil
     
     private let log: NextLog
     private var readers: [Reader_p] = []
@@ -142,21 +211,21 @@ open class Module {
     
     public init(
         moduleType: ModuleType,
-        popup: Popup_p? = nil,
+        popup: (() -> Popup_p?)? = nil,
         settings: Settings_v? = nil,
         portal: Portal_p? = nil,
         notifications: NotificationsWrapper? = nil,
-        preview: PreviewWrapper? = nil
+        preview: (() -> PreviewWrapper?)? = nil
     ) {
         self.moduleType = moduleType
         self.portal = portal
         self.config = module_c(in: Bundle(for: type(of: self)).path(forResource: "config", ofType: "plist")!)
-        
+
         self.log = NextLog.shared.copy(category: self.config.name)
         self.settingsView = settings
-        self.popupView = popup
+        self.popupViewFactory = popup
+        self.previewViewFactory = preview
         self.notificationsView = notifications
-        self.previewView = preview
         self.menuBar = MenuBar(moduleName: self.config.name)
         self.available = self.isAvailable()
         self.enabled = Store.shared.bool(key: "\(self.config.name)_state", defaultValue: self.config.defaultState)
@@ -285,6 +354,11 @@ open class Module {
     private func popupVisibilityCallback(_ state: Bool) {
         self.popupVisible = state
         self.updateReaderVisibility()
+        if state {
+            // 弹窗视图是懒建的，刚建出来还是空的。主动读一次，不然要等到下一个轮询周期
+            // （最长一个间隔）才填上，头一两秒会显示空白。
+            self.readers.forEach { $0.read() }
+        }
     }
     
     @objc private func listenForWindowOpen(_ notification: Notification) {

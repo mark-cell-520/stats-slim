@@ -86,7 +86,7 @@ public struct BLEDevice: Codable {
 
 public class Bluetooth: Module {
     private var devicesReader: DevicesReader?
-    private let popupView: Popup = Popup()
+    private var popupView: Popup? { self.livePopupView as? Popup }
     private let settingsView: Settings = Settings()
     private let notificationsView: Notifications
     
@@ -95,7 +95,7 @@ public class Bluetooth: Module {
         
         super.init(
             moduleType: .bluetooth,
-            popup: self.popupView,
+            popup: { Popup() },
             settings: self.settingsView,
             notifications: self.notificationsView
         )
@@ -117,7 +117,7 @@ public class Bluetooth: Module {
         
         let active = value.filter{ $0.isPaired || ($0.isConnected && !$0.batteryLevel.isEmpty) }
         DispatchQueue.main.async(execute: {
-            self.popupView.batteryCallback(active)
+            self.popupView?.batteryCallback(active)
             self.settingsView.setList(active)
             self.notificationsView.callback(active)
         })

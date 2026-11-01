@@ -15,34 +15,54 @@ macOS 菜单栏系统监控，[exelban/stats](https://github.com/exelban/stats) 
 
 | 指标 | 上游 3.0.23 | 本分支 |
 | --- | --- | --- |
-| 物理内存占用（活动监视器「内存」列） | 140.8 M | 约 75 M |
-| RSS | 214.7 MB | 约 143 MB |
+| 物理内存占用（活动监视器「内存」列） | 140.8 M | 48.4 M |
+| RSS | 214.7 MB | 108.6 MB |
 | CPU | 4.9 % | 约 1 % |
+| 线程数 | 19 | 12 |
 | 对外 ICMP 探测 | 3600 次/小时 | 120 次/小时 |
 | 磁盘活动读数的 IOKit 遍历 | 3600 次/小时 | 720 次/小时 |
 | fork 子进程（蓝牙外设电量） | 480 次/小时 | 120 次/小时 |
+| 启动时预建的视图树 | 10 模块 × 7 棵 | 10 模块 × 3 棵 |
 | LevelDB 常驻内存 | memtable 上限 4 MB + 8 MB 块缓存 | 1 MB + 2 MB |
 
-测量方式：`ps -o rss=` 取 RSS，`heap <pid>` 取物理内存占用，`top -l 6 -s 2` 取稳定后的
-CPU。各次数的来源见下面每一项的文件位置说明。
+测量方式：`ps -o rss=` 取 RSS，`heap <pid>` 取物理内存占用，`top -l 6 -s 2` 与
+`ps -o time=` 取稳定后的 CPU。各次数的来源见下面每一项的文件位置说明。
 
 ## 改了什么
 
-### 1. 设置窗口与弹窗改成懒加载（内存 140.8 M → 72.8 M，占大头）
+### 1. 启动时预建的窗口与视图树改成懒加载（内存 140.8 M → 48.4 M，占大头）
 
-`Kit/module/module.swift`：`Module.init` 原来在启动时为 10 个模块各建一个 `Window`
-（整套设置界面：分段控件、标签页、控件选择器、各设置容器）和一个 `PopupWindow`
-（一个 NSWindow 加整套弹窗视图）。现在两者都改成 `private var _window` / `_popup`
-加计算属性，第一次被访问时才创建。
+上游 `Kit/module/module.swift` 的 `Module.init` 会收到每个模块传进来的七棵视图树，
+并且全部在启动时建完。本分支把其中四棵改成第一次用到时才建：
 
-访问点全部在主线程（菜单栏点击、设置界面、启动流程），所以没有加锁。`enable()` /
-`disable()` 里原来那两处 `window?.setState()` 走的是 `_window`，不会为了设一个开关
-状态就把界面建出来——顺带一说，`Window.setState` 依赖的 `enableControl` 在上游里
-从未被赋值，那两行本来就是空操作（模块开关在设置窗口的工具栏上，见
-`Stats/Views/Settings.swift` 的 `toggleButton`）。
+· `Window`（整套设置界面：分段控件、标签页、控件选择器、各设置容器）与 `PopupWindow`
+  （一个 NSWindow 加整套弹窗视图）——改成 `private var _window` / `_popup` 加计算属性。
+· 模块自己的 `Popup` 与 `Preview` 子树——`Module.init` 改为只收工厂闭包
+  （`popup: { Popup(.CPU) }`），第一次访问 `popupViewRef` / `previewViewRef` 时才建。
 
-这是本分支唯一的大改动，也是唯一一处行为差异：设置窗口第一次打开时会比之前稍慢一次
-（建界面），之后无差别。
+四棵加起来实测 92.4 M 物理内存（140.8 M → 48.4 M）。剩下三棵刻意不动：
+
+· `Settings` 的行是在 `load(widgets:)` 里铺的，`init` 本身几乎不花钱；
+· `Notifications` 的 `init` 只建几个通知 id；
+· `Portal` 不能懒化——`Stats/Views/CombinedView.swift` 要用 `m.portal != nil`
+  判断模块能不能进合并视图，懒了会全都判成不能进。
+
+配套的三处细节，都是懒化必须处理的：
+
+· 读取器回调改走 `livePopupView` / `livePreviewView`（不触发创建）。弹窗没打开时，
+  没必要为了更新一个看不见的界面而把整套视图建出来。
+· `popupKeyboardShortcut` 改为直接读 Store。`Stats/helpers.swift` 的 `handleKeyEvent`
+  会在每次按键时遍历所有模块比对这个值，从视图上取会把所有模块的弹窗一次性全建出来。
+· `Module.popupViewDidLoad()` / `previewViewDidLoad()` 钩子。Sensors 原来在 `init` 里
+  调一次 `popupView.setup(...)` 把传感器列表送进弹窗，那会把懒建出来的视图立刻建回去；
+  现在改由钩子在视图第一次建好时补上。弹窗打开时还会主动读一次，免得头两秒显示空白。
+
+懒加载引入了一次运行期写入（原来 `popupView` 是 init 时一次性赋值的 `let`），
+而模块的读取器回调在后台线程读它，所以 `_popupView` / `_previewView` 的读写都过了
+一把 `NSLock`。锁只在创建时走一次，之后每次回调都是一次无竞争的 lock/unlock。
+
+这是本分支唯一的大改动，也是唯一一处行为差异：设置窗口与弹窗第一次打开时会比之前稍慢
+一次（建界面），之后无差别。
 
 ### 2. 读取器默认轮询间隔 1 秒 → 2 秒（CPU 4.9 % → 约 1 %）
 
@@ -59,12 +79,12 @@ ICMP 回显。这两个数字（延迟/抖动）只用于弹窗，菜单栏的�
 ### 4. 磁盘活动读数不再钉在 1 秒（IOKit 遍历 3600 → 720 次/小时）
 
 `Modules/Disk/readers.swift` 的 `ActivityReader.setup()` 原来写死 `setInterval(1)`，
-于是设置界面里的「Update interval」对它完全不起作用——`Reader.initStoreValues` 见
-`interval` 非空就直接返回，用户选的 5 秒永远被覆盖。而这一 tick 的代价很高：每个卷都要
-`mountedVolumeURLs` + `DADiskCreateFromVolumePath` + `DADiskCopyIOMedia`，再沿 IOKit
-注册表往上找存储驱动读统计字节数。速率是「字节差 / 时间差」，间隔长一点读数同样准。
-改成本项目前共用的那个间隔键，并在 `Modules/Disk/main.swift` 的 `setInterval` 回调里
-把活动读数一起接上（菜单栏带图表控件时仍会被压回 1 秒，与上游一致）。
+于是设置界面里的「Update interval」对它完全不起作用（`Reader.initStoreValues` 见
+`interval` 非空就直接返回）。而这一 tick 的代价很高：每个卷都要 `mountedVolumeURLs` +
+`DADiskCreateFromVolumePath` + `DADiskCopyIOMedia`，再沿 IOKit 注册表往上找存储驱动
+读统计字节数。速率是「字节差 / 时间差」，间隔长一点读数同样准。改成本项目前共用的那个
+间隔键，并在 `Modules/Disk/main.swift` 的 `setInterval` 回调里把活动读数一起接上
+（菜单栏带图表控件时仍会被压回 1 秒，与上游一致）。
 
 ### 5. 网络读数不再每个 tick 复制整套系统代理配置
 
@@ -86,13 +106,14 @@ ICMP 回显。这两个数字（延迟/抖动）只用于弹窗，菜单栏的�
 把编码挪到节流判断之后，同时把节流从 30 秒放到 60 秒——这份「最后一次读数」只在下次
 启动时用来让菜单栏不至于空一瞬，晚一分钟没有区别，而 LevelDB 的写入量减半。
 
-### 8. 内嵌 LevelDB 的缓冲区收回收（常驻约省 2.5 M）
+### 8. 内嵌 LevelDB 的缓冲区回收（常驻约省 2.5 M）
 
 `Kit/lldb/lldb.m`：`leveldb::Options` 原来只设 `create_if_missing`，其余全默认。
 默认 `write_buffer_size` 是 4 MB（未落盘的 memtable 整个住在内存里，LevelDB 的注释还
 写明最多可能同时持有两个），不设 `block_cache` 时内部会自建 8 MB 的 LRU。Stats 全部
 数据才几百 KB 到几 MB，这两个默认值纯占地方。改成 1 MB / 2 MB 后落表从约 70 分钟一次
 变成约 20 分钟一次，每次落表加 compaction 实测 10–20 ms、产出只有几十 KB，代价可以忽略。
+注意要显式 `#import <cache.h>` 才拿得到 `NewLRUCache`。
 
 ### 9. app 进程不再链接 WidgetKit / SwiftUI / Charts
 
@@ -107,15 +128,6 @@ WidgetsExtension 目标。桌面组件本身没有被删掉，它整套住在 Wi
 （用一个只含 `NSApplication.run()` 的空 AppKit 程序即可复现），所以断开链接只省下
 约 5–10 M。留着它的真正理由是让 app 与 11 个模块框架的依赖关系变干净，以及让上面
 第 1 项的懒加载不会连带触发 WidgetKit 那套东西。
-
-## 还有什么没动
-
-启动时每个模块仍会预建五棵视图树（`Settings` / `Popup` / `Portal` / `Notifications` /
-`Preview`，见各模块 `main.swift` 的 `init`），实测合计约 10–14 M。其中 `Settings` 的
-行是在 `load(widgets:)` 里建的、`init` 本身很便宜，真正贵的是 `Popup` 与 `Preview`
-子类在 `init` 里直接铺行，以及 `PortalWrapper.init` 调的 `load()`。这一批要改成懒加载
-得同时动 10 个模块的约 400 处引用（每个访问点都要区分「已建好」和「顺手建出来」），
-收益是当前占用的 15 % 左右，但界面回归风险明显高于上面各项，所以这一轮没做。
 
 ## 安装
 
@@ -160,6 +172,13 @@ heap $PID | grep "Physical footprint:"   # 活动监视器那个「内存」数�
 top -l 4 -s 2 -pid $PID -stats cpu | tail -1   # 稳定后的 CPU
 ```
 
+想单独验证懒加载是否生效，数一下这几类对象在不在堆里就行——懒化之后启动时它们应该是 0：
+
+```bash
+heap $PID | awk 'NF>=6 && $2 ~ /^[0-9]+$/ {print $1"\t"$(NF-1)}' \
+  | grep -cE "LabelField|ValueField|TextView|PreferencesRow"
+```
+
 ### Homebrew
 
 上游的 `brew install stats` 装的是官方版本，不是这个分支。
@@ -176,8 +195,11 @@ top -l 4 -s 2 -pid $PID -stats cpu | tail -1   # 稳定后的 CPU
   `release.yaml` 改成了「构建 + 打 zip + 传 Release」，不签名不公证。
 · `.github/FUNDING.yml` 已删除，它指向上游作者的赞助渠道；想支持上游请去
   [exelban/stats](https://github.com/exelban/stats)。
+· `Module.init` 的签名变了：`popup` 与 `preview` 两个参数从「传视图实例」改成
+  「传工厂闭包」，模块侧 `private let popupView: Popup` 相应变成计算属性。
+  合并上游的模块改动时要留意这里。
 · bundle id 仍是 `eu.exelban.Stats`，与上游版共用一份配置
-（`~/Library/Preferences/eu.exelban.Stats.plist`）。两个版本不要同时装。
+  （`~/Library/Preferences/eu.exelban.Stats.plist`）。两个版本不要同时装。
 
 ## 许可
 

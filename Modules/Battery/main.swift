@@ -64,7 +64,7 @@ struct UPS_Usage: Codable {
 }
 
 public class Battery: Module {
-    private let popupView: Popup
+    private var popupView: Popup? { self.livePopupView as? Popup }
     private let settingsView: Settings
     private let portalView: Portal
     private let notificationsView: Notifications
@@ -81,13 +81,12 @@ public class Battery: Module {
     
     public init() {
         self.settingsView = Settings(.battery)
-        self.popupView = Popup(.battery)
         self.portalView = Portal(.battery, height: 70)
         self.notificationsView = Notifications(.battery)
         
         super.init(
             moduleType: .battery,
-            popup: self.popupView,
+            popup: { Popup(.battery) },
             settings: self.settingsView,
             portal: self.portalView,
             notifications: self.notificationsView
@@ -99,7 +98,7 @@ public class Battery: Module {
         }
         self.processReader = ProcessReader(.battery) { [weak self] value in
             if let list = value {
-                self?.popupView.processCallback(list)
+                self?.popupView?.processCallback(list)
             }
         }
         
@@ -109,7 +108,7 @@ public class Battery: Module {
             }
         }
         self.settingsView.callbackWhenUpdateNumberOfProcesses = { [weak self] in
-            self?.popupView.numberOfProcessesUpdated()
+            self?.popupView?.numberOfProcessesUpdated()
             DispatchQueue.global(qos: .background).async {
                 self?.processReader?.read()
             }
@@ -132,7 +131,7 @@ public class Battery: Module {
     private func usageCallback(_ raw: Battery_Usage?) {
         guard let value = raw, self.enabled else { return }
         
-        self.popupView.usageCallback(value)
+        self.popupView?.usageCallback(value)
         self.portalView.loadCallback(value)
         self.notificationsView.usageCallback(value)
         

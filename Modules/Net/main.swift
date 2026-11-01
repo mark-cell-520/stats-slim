@@ -164,11 +164,11 @@ public struct Network_Process: Codable, Process_p {
 }
 
 public class Network: Module {
-    private let popupView: Popup
+    private var popupView: Popup? { self.livePopupView as? Popup }
     private let settingsView: Settings
     private let portalView: Portal
     private let notificationsView: Notifications
-    private let previewView: Preview
+    private var previewView: Preview? { self.livePreviewView as? Preview }
     
     private var usageReader: UsageReader? = nil
     private var processReader: ProcessReader? = nil
@@ -198,31 +198,29 @@ public class Network: Module {
     
     public init() {
         self.settingsView = Settings(.network)
-        self.popupView = Popup(.network)
         self.portalView = Portal(.network, height: 90)
         self.notificationsView = Notifications(.network)
-        self.previewView = Preview(.network)
         
         super.init(
             moduleType: .network,
-            popup: self.popupView,
+            popup: { Popup(.network) },
             settings: self.settingsView,
             portal: self.portalView,
             notifications: self.notificationsView,
-            preview: self.previewView
+            preview: { Preview(.network) }
         )
         guard self.available else { return }
         
         self.usageReader = UsageReader(.network) { [weak self] value in
             self?.usageCallback(value)
         }
-        self.popupView.locationPermissionAction = { [weak self] in
+        self.popupView?.locationPermissionAction = { [weak self] in
             self?.usageReader?.requestWiFiLocationAuthorization()
         }
         self.processReader = ProcessReader(.network) { [weak self] value in
             if let list = value {
-                self?.popupView.processCallback(list)
-                self?.previewView.processCallback(list)
+                self?.popupView?.processCallback(list)
+                self?.previewView?.processCallback(list)
             }
         }
         self.connectivityReader = ConnectivityReader(.network) { [weak self] value in
@@ -231,8 +229,8 @@ public class Network: Module {
         
         self.settingsView.callbackWhenUpdateNumberOfProcesses = { [weak self] in
             guard let self else { return }
-            self.popupView.numberOfProcessesUpdated()
-            self.previewView.numberOfProcessesUpdated()
+            self.popupView?.numberOfProcessesUpdated()
+            self.previewView?.numberOfProcessesUpdated()
             DispatchQueue.global(qos: .background).async { [weak self] in
                 self?.processReader?.read()
             }
@@ -247,7 +245,7 @@ public class Network: Module {
         }
         self.settingsView.connectivityHostCallback = { [weak self] isDisabled in
             if isDisabled {
-                self?.popupView.resetConnectivityView()
+                self?.popupView?.resetConnectivityView()
                 self?.connectivityCallback(Network_Connectivity(status: false))
             }
         }
@@ -277,10 +275,10 @@ public class Network: Module {
     private func usageCallback(_ raw: Network_Usage?) {
         guard let value = raw, self.enabled else { return }
         
-        self.popupView.usageCallback(value)
+        self.popupView?.usageCallback(value)
         self.portalView.usageCallback(value)
         self.notificationsView.usageCallback(value)
-        self.previewView.usageCallback(value)
+        self.previewView?.usageCallback(value)
         
         var upload: Int64 = value.bandwidth.upload
         var download: Int64 = value.bandwidth.download
@@ -382,9 +380,9 @@ public class Network: Module {
     private func connectivityCallback(_ raw: Network_Connectivity?) {
         guard let value = raw, self.enabled else { return }
         
-        self.popupView.connectivityCallback(value)
+        self.popupView?.connectivityCallback(value)
         self.notificationsView.connectivityCallback(value)
-        self.previewView.connectivityCallback(value)
+        self.previewView?.connectivityCallback(value)
         
         self.menuBar.widgets.filter{ $0.isActive }.forEach { (w: SWidget) in
             switch w.item {

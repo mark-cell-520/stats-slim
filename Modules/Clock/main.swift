@@ -87,7 +87,7 @@ public struct Clock_t: Codable {
 }
 
 public class Clock: Module {
-    private let popupView: Popup = Popup(.clock)
+    private var popupView: Popup? { self.livePopupView as? Popup }
     private let portalView: Portal
     private let settingsView: Settings = Settings(.clock)
     
@@ -119,7 +119,7 @@ public class Clock: Module {
         
         super.init(
             moduleType: .clock,
-            popup: self.popupView,
+            popup: { Popup(.clock) },
             settings: self.settingsView,
             portal: self.portalView
         )
@@ -152,7 +152,7 @@ public class Clock: Module {
         }
         
         DispatchQueue.main.async(execute: {
-            self.popupView.callback(clocks)
+            self.popupView?.callback(clocks)
             self.portalView.callback(clocks)
         })
         

@@ -212,11 +212,11 @@ public struct Disk_process: Process_p, Codable {
 }
 
 public class Disk: Module {
-    private let popupView: Popup = Popup(.disk)
+    private var popupView: Popup? { self.livePopupView as? Popup }
     private let settingsView: Settings = Settings(.disk)
     private let portalView: Portal = Portal(.disk, height: 120)
     private let notificationsView: Notifications = Notifications(.disk)
-    private let previewView: Preview = Preview(.disk)
+    private var previewView: Preview? { self.livePreviewView as? Preview }
     
     private var capacityReader: CapacityReader?
     private var activityReader: ActivityReader?
@@ -240,11 +240,11 @@ public class Disk: Module {
     public init() {
         super.init(
             moduleType: .disk,
-            popup: self.popupView,
+            popup: { Popup(.disk) },
             settings: self.settingsView,
             portal: self.portalView,
             notifications: self.notificationsView,
-            preview: self.previewView
+            preview: { Preview(.disk) }
         )
         guard self.available else { return }
         
@@ -260,8 +260,8 @@ public class Disk: Module {
         }
         self.processReader = ProcessReader(.disk) { [weak self] value in
             if let list = value {
-                self?.popupView.processCallback(list)
-                self?.previewView.processCallback(list)
+                self?.popupView?.processCallback(list)
+                self?.previewView?.processCallback(list)
             }
         }
         self.smartReader = SMARTReader(.disk) { [weak self] value in
@@ -291,8 +291,8 @@ public class Disk: Module {
             self?.smartReader?.setInterval(value)
         }
         self.settingsView.callbackWhenUpdateNumberOfProcesses = { [weak self] in
-            self?.popupView.numberOfProcessesUpdated()
-            self?.previewView.numberOfProcessesUpdated()
+            self?.popupView?.numberOfProcessesUpdated()
+            self?.previewView?.numberOfProcessesUpdated()
             DispatchQueue.global(qos: .background).async {
                 self?.processReader?.read()
             }
@@ -305,8 +305,8 @@ public class Disk: Module {
         guard self.enabled else { return }
         
         DispatchQueue.main.async(execute: {
-            self.popupView.capacityCallback(value)
-            self.previewView.capacityCallback(value)
+            self.popupView?.capacityCallback(value)
+            self.previewView?.capacityCallback(value)
         })
         self.settingsView.setList(value)
         
@@ -375,8 +375,8 @@ public class Disk: Module {
         guard self.enabled else { return }
         
         DispatchQueue.main.async(execute: {
-            self.popupView.activityCallback(value)
-            self.previewView.activityCallback(value)
+            self.popupView?.activityCallback(value)
+            self.previewView?.activityCallback(value)
         })
         
         guard let d = value.first(where: { $0.mediaName == self.selectedDisk }) ?? value.first(where: { $0.root }) else {
@@ -403,9 +403,9 @@ public class Disk: Module {
         guard self.enabled else { return }
         
         DispatchQueue.main.async(execute: {
-            self.popupView.smartCallback(value)
+            self.popupView?.smartCallback(value)
         })
-        self.previewView.smartCallback(value)
+        self.previewView?.smartCallback(value)
     }
 }
 

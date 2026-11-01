@@ -106,11 +106,11 @@ public class GPUs: Codable, RemoteType {
 }
 
 public class GPU: Module {
-    private let popupView: Popup
+    private var popupView: Popup? { self.livePopupView as? Popup }
     private let settingsView: Settings
     private let portalView: Portal
     private let notificationsView: Notifications
-    private let previewView: Preview
+    private var previewView: Preview? { self.livePreviewView as? Preview }
     
     private var infoReader: InfoReader? = nil
     
@@ -129,19 +129,17 @@ public class GPU: Module {
     }
     
     public init() {
-        self.popupView = Popup(.GPU)
         self.settingsView = Settings(.GPU)
         self.portalView = Portal(.GPU, height: 70)
         self.notificationsView = Notifications(.GPU)
-        self.previewView = Preview(.GPU)
         
         super.init(
             moduleType: .GPU,
-            popup: self.popupView,
+            popup: { Popup(.GPU) },
             settings: self.settingsView,
             portal: self.portalView,
             notifications: self.notificationsView,
-            preview: self.previewView,
+            preview: { Preview(.GPU) },
         )
         guard self.available else { return }
         
@@ -178,10 +176,10 @@ public class GPU: Module {
             return
         }
         
-        self.popupView.loadCallback(selectedGPU)
+        self.popupView?.loadCallback(selectedGPU)
         self.portalView.callback(selectedGPU)
         self.notificationsView.usageCallback(utilization)
-        self.previewView.loadCallback(selectedGPU)
+        self.previewView?.loadCallback(selectedGPU)
         
         self.menuBar.widgets.filter{ $0.isActive }.forEach { (w: SWidget) in
             switch w.item {

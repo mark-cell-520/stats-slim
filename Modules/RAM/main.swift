@@ -84,11 +84,11 @@ public struct Pressure: Codable {
 }
 
 public class RAM: Module {
-    private let popupView: Popup
+    private var popupView: Popup? { self.livePopupView as? Popup }
     private let settingsView: Settings
     private let portalView: Portal
     private let notificationsView: Notifications
-    private let previewView: Preview
+    private var previewView: Preview? { self.livePreviewView as? Preview }
     
     private var usageReader: UsageReader? = nil
     private var processReader: ProcessReader? = nil
@@ -131,18 +131,16 @@ public class RAM: Module {
     
     public init() {
         self.settingsView = Settings(.RAM)
-        self.popupView = Popup(.RAM)
         self.portalView = Portal(.RAM, height: 80)
         self.notificationsView = Notifications(.RAM)
-        self.previewView = Preview(.RAM)
         
         super.init(
             moduleType: .RAM,
-            popup: self.popupView,
+            popup: { Popup(.RAM) },
             settings: self.settingsView,
             portal: self.portalView,
             notifications: self.notificationsView,
-            preview: self.previewView
+            preview: { Preview(.RAM) }
         )
         guard self.available else { return }
         
@@ -162,14 +160,14 @@ public class RAM: Module {
         }
         self.processReader = ProcessReader(.RAM) { [weak self] value in
             if let list = value {
-                self?.popupView.processCallback(list)
-                self?.previewView.processCallback(list)
+                self?.popupView?.processCallback(list)
+                self?.previewView?.processCallback(list)
             }
         }
         
         self.settingsView.callbackWhenUpdateNumberOfProcesses = { [weak self] in
-            self?.popupView.numberOfProcessesUpdated()
-            self?.previewView.numberOfProcessesUpdated()
+            self?.popupView?.numberOfProcessesUpdated()
+            self?.previewView?.numberOfProcessesUpdated()
             DispatchQueue.global(qos: .background).async {
                 self?.processReader?.read()
             }
@@ -181,10 +179,10 @@ public class RAM: Module {
     private func loadCallback(_ raw: RAM_Usage?) {
         guard let value = raw, self.enabled else { return }
         
-        self.popupView.loadCallback(value)
+        self.popupView?.loadCallback(value)
         self.portalView.callback(value)
         self.notificationsView.loadCallback(value)
-        self.previewView.loadCallback(value)
+        self.previewView?.loadCallback(value)
         
         let total: Double = value.total == 0 ? 1 : value.total
         self.menuBar.widgets.filter{ $0.isActive }.forEach { (w: SWidget) in

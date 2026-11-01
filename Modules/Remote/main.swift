@@ -174,16 +174,15 @@ public struct RemoteHostBucket: Codable {
 
 public class Remote: Module {
     private let settingsView: Settings
-    private let popupView: Popup
+    private var popupView: Popup? { self.livePopupView as? Popup }
     private var dataReader: DataReader?
     
     public init() {
         self.settingsView = Settings(.remote)
-        self.popupView = Popup(.remote)
         
         super.init(
             moduleType: .remote,
-            popup: self.popupView,
+            popup: { Popup(.remote) },
             settings: self.settingsView,
         )
         
@@ -208,7 +207,7 @@ public class Remote: Module {
         guard let auth = notification.userInfo?["auth"] as? Bool else { return }
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
-            self.popupView.authorizationStatus(auth)
+            self.popupView?.authorizationStatus(auth)
             if auth {
                 self.dataReader?.read()
             } else {
@@ -221,7 +220,7 @@ public class Remote: Module {
         guard let snapshot, self.enabled else { return }
         
         DispatchQueue.main.async(execute: {
-            self.popupView.callback(snapshot)
+            self.popupView?.callback(snapshot)
         })
         
         self.menuBar.widgets.filter{ $0.isActive }.forEach { (w: SWidget) in

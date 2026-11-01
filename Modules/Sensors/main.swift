@@ -14,7 +14,7 @@ import Kit
 
 public class Sensors: Module {
     private var sensorsReader: SensorsReader?
-    private let popupView: Popup
+    private var popupView: Popup? { self.livePopupView as? Popup }
     private let settingsView: Settings
     private let portalView: Portal
     private let notificationsView: Notifications
@@ -27,14 +27,13 @@ public class Sensors: Module {
     
     public init() {
         self.settingsView = Settings(.sensors)
-        self.popupView = Popup()
         self.portalView = Portal(.sensors)
         self.notificationsView = Notifications(.sensors)
         self.selectedSensor = Store.shared.string(key: "\(ModuleType.sensors.stringValue)_sensor", defaultValue: "Average System Total")
         
         super.init(
             moduleType: .sensors,
-            popup: self.popupView,
+            popup: { Popup() },
             settings: self.settingsView,
             portal: self.portalView,
             notifications: self.notificationsView
@@ -46,10 +45,11 @@ public class Sensors: Module {
         }
         
         self.settingsView.setList(self.sensorsReader?.list.sensors)
-        self.popupView.setup(self.sensorsReader?.list.sensors)
+        // 弹窗视图改成懒建了，init 里这次 setup() 不能留——它会为建一个还没人打开的界面
+        // 把整套视图建出来。改由 Module.popupViewDidLoad() 在视图第一次建好时补上。
         self.portalView.setup(self.sensorsReader?.list.sensors)
         self.notificationsView.setup(self.sensorsReader?.list.sensors)
-        
+
         self.settingsView.callback = { [weak self] in
             self?.sensorsReader?.read()
         }
@@ -60,7 +60,7 @@ public class Sensors: Module {
             DispatchQueue.global(qos: .background).async {
                 self?.sensorsReader?.HIDCallback()
                 DispatchQueue.main.async {
-                    self?.popupView.setup(self?.sensorsReader?.list.sensors)
+                    self?.popupView?.setup(self?.sensorsReader?.list.sensors)
                     self?.portalView.setup(self?.sensorsReader?.list.sensors)
                     self?.settingsView.setList(self?.sensorsReader?.list.sensors)
                     self?.notificationsView.setup(self?.sensorsReader?.list.sensors)
@@ -71,7 +71,7 @@ public class Sensors: Module {
             DispatchQueue.global(qos: .background).async {
                 self?.sensorsReader?.unknownCallback()
                 DispatchQueue.main.async {
-                    self?.popupView.setup(self?.sensorsReader?.list.sensors)
+                    self?.popupView?.setup(self?.sensorsReader?.list.sensors)
                     self?.portalView.setup(self?.sensorsReader?.list.sensors)
                     self?.settingsView.setList(self?.sensorsReader?.list.sensors)
                     self?.notificationsView.setup(self?.sensorsReader?.list.sensors)
@@ -99,10 +99,16 @@ public class Sensors: Module {
         }
     }
     
+    public override func popupViewDidLoad() {
+        // 弹窗视图是懒建的，第一次建好时把传感器列表补进去（等价于上游在 init 里做的那次
+        // setup()，只是推迟到真的有人要打开弹窗）。
+        self.popupView?.setup(self.sensorsReader?.list.sensors)
+    }
+
     private func usageCallback(_ raw: Sensors_List?) {
         guard let value = raw, self.enabled else { return }
         
-        self.popupView.usageCallback(value.sensors)
+        self.popupView?.usageCallback(value.sensors)
         self.portalView.usageCallback(value.sensors)
         self.notificationsView.usageCallback(value.sensors)
         
