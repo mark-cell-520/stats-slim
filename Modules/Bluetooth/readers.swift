@@ -43,8 +43,12 @@ internal class DevicesReader: Reader<[BLEDevice]>, CBCentralManagerDelegate, CBP
     
     private var profilerCache: (ts: Date, value: ([bleDevice], [String]))? = nil
     private var pmsetCache: (ts: Date, value: [bleDevice])? = nil
-    private let profilerTTL: TimeInterval = 30
-    private let pmsetTTL: TimeInterval = 10
+    // 这两个缓存 TTL 决定 fork 子进程的频率：system_profiler 与 pmset 各被 fork 一次。
+    // 上游 30 秒 / 10 秒，而读出来的只是外设电量，本地也没有控件在显示它（Bluetooth_widget
+    // 为空串）时纯属白发。缓存延长后每小时 fork 数从 480 降到 120，电量读数最多晚一分钟，
+    // 对「AirPods 还剩多少电」这种量级完全够用。
+    private let profilerTTL: TimeInterval = 60
+    private let pmsetTTL: TimeInterval = 30
     
     static let batteryServiceUUID = CBUUID(string: "0x180F")
     static let batteryCharacteristicsUUID = CBUUID(string: "0x2A19")

@@ -327,7 +327,10 @@ internal class UsageReader: Reader<Network_Usage>, CWEventDelegate, CLLocationMa
         
         self.usage.status = self.reachability.isReachable
         
-        if self.vpnConnection && self.VPNMode {
+        // 两个条件的顺序换一下：VPNMode 是内存字典里的一次查找，vpnConnection 要调
+        // CFNetworkCopySystemProxySettings() 把整套系统代理配置复制出来再扫一遍 scope 名。
+        // VPN 修正默认是关的，短路之后这一 tick 就再也不去碰代理配置了。
+        if self.VPNMode && self.vpnConnection {
             self.usage.bandwidth.upload /= 2
             self.usage.bandwidth.download /= 2
         }

@@ -132,11 +132,14 @@ public class DB {
     public func insert(key: String, value: Codable, force: Bool = false) {
         self.queue.sync { self._values[key] = value }
 
-        // 先判断这一轮要不要真落盘，再编码。写盘本身有 30 秒节流，而 JSON 编码在读线程上
-        // 每个 tick 都会跑一次；把编码挪到节流后面，被节流掉的那些次就不必再付编码的代价。
+        // 先判断这一轮要不要真落盘，再编码。写盘本身有节流，而 JSON 编码在读线程上每个
+        // tick 都会跑一次；把编码挪到节流后面，被节流掉的那些次就不必再付编码的代价。
+        // 节流从上游的 30 秒放到 60 秒：这份「最后一次读数」只在下次启动时用来让菜单栏
+        // 不至于空一瞬，晚一分钟没有区别，而 LevelDB 的写入量直接减半（配合 lldb.m 里
+        // 调小的 write_buffer_size，落表与 compaction 也一起少了）。
         let now = Date()
         let shouldWrite: Bool = self.queue.sync {
-            if !force, let ts = self._writeTS[key], (now.timeIntervalSince1970-ts.timeIntervalSince1970) < 30 {
+            if !force, let ts = self._writeTS[key], (now.timeIntervalSince1970-ts.timeIntervalSince1970) < 60 {
                 return false
             }
             self._writeTS[key] = now

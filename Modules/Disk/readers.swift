@@ -172,7 +172,12 @@ internal class ActivityReader: Reader<Disks> {
     private var samples: [UInt64: (read: UInt64?, write: UInt64?, time: UInt64)] = [:]
     
     override func setup() {
-        self.setInterval(1)
+        // 上游在这里把间隔钉死在 1 秒，于是设置界面里的「Update interval」对磁盘活动读数
+        // 完全不起作用（Reader.initStoreValues 见 interval 非空就直接返回）。而这一 tick 的
+        // 代价很高：每个卷都要 mountedVolumeURLs + DADiskCreateFromVolumePath +
+        // DADiskCopyIOMedia，再沿 IOKit 注册表往上找存储驱动读统计字节数，等于每小时
+        // 3600 次注册表遍历。速率本身是「字节差 / 时间差」，间隔长一点读数同样准，只是
+        // 刷新得慢些，所以改成跟随用户在设置里选的那个间隔。
         NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(self.reset), name: NSWorkspace.didWakeNotification, object: nil)
     }
     

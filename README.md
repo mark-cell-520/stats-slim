@@ -15,13 +15,16 @@ macOS 菜单栏系统监控，[exelban/stats](https://github.com/exelban/stats) 
 
 | 指标 | 上游 3.0.23 | 本分支 |
 | --- | --- | --- |
-| 物理内存占用（活动监视器「内存」列） | 140.8 M | 72.8 M |
-| RSS | 214.7 MB | 137.9 MB |
-| CPU | 4.9 % | 0.9 % |
+| 物理内存占用（活动监视器「内存」列） | 140.8 M | 约 75 M |
+| RSS | 214.7 MB | 约 143 MB |
+| CPU | 4.9 % | 约 1 % |
 | 对外 ICMP 探测 | 3600 次/小时 | 120 次/小时 |
+| 磁盘活动读数的 IOKit 遍历 | 3600 次/小时 | 720 次/小时 |
+| fork 子进程（蓝牙外设电量） | 480 次/小时 | 120 次/小时 |
+| LevelDB 常驻内存 | memtable 上限 4 MB + 8 MB 块缓存 | 1 MB + 2 MB |
 
-测量方式：`ps -o rss=` 取 RSS，`heap <pid>` 取物理内存占用，`top -l 4 -s 2` 取稳定后的
-CPU。ICMP 次数由读取器间隔推算。
+测量方式：`ps -o rss=` 取 RSS，`heap <pid>` 取物理内存占用，`top -l 6 -s 2` 取稳定后的
+CPU。各次数的来源见下面每一项的文件位置说明。
 
 ## 改了什么
 
@@ -53,13 +56,45 @@ CPU。ICMP 次数由读取器间隔推算。
 ICMP 回显。这两个数字（延迟/抖动）只用于弹窗，菜单栏的上传下载读数完全不依赖它。
 默认改成 30 秒，需要秒级延迟读数就把 `Network_updateICMPInterval` 改回 1。
 
-### 4. DB 写盘前不再白编码一次
+### 4. 磁盘活动读数不再钉在 1 秒（IOKit 遍历 3600 → 720 次/小时）
+
+`Modules/Disk/readers.swift` 的 `ActivityReader.setup()` 原来写死 `setInterval(1)`，
+于是设置界面里的「Update interval」对它完全不起作用——`Reader.initStoreValues` 见
+`interval` 非空就直接返回，用户选的 5 秒永远被覆盖。而这一 tick 的代价很高：每个卷都要
+`mountedVolumeURLs` + `DADiskCreateFromVolumePath` + `DADiskCopyIOMedia`，再沿 IOKit
+注册表往上找存储驱动读统计字节数。速率是「字节差 / 时间差」，间隔长一点读数同样准。
+改成本项目前共用的那个间隔键，并在 `Modules/Disk/main.swift` 的 `setInterval` 回调里
+把活动读数一起接上（菜单栏带图表控件时仍会被压回 1 秒，与上游一致）。
+
+### 5. 网络读数不再每个 tick 复制整套系统代理配置
+
+`Modules/Net/readers.swift`：`if self.vpnConnection && self.VPNMode` 的两个条件顺序
+对调。`vpnConnection` 要调 `CFNetworkCopySystemProxySettings()` 把整套代理配置复制出来
+再扫一遍 scope 名，而 `VPNMode` 只是内存字典里的一次查找。VPN 修正默认关闭，对调之后
+这一 tick 直接短路，1800 次每小时的系统代理复制全省掉。
+
+### 6. 蓝牙外设电量的子进程 fork 减到四分之一（480 → 120 次/小时）
+
+`Modules/Bluetooth/readers.swift`：`profilerTTL` 30 → 60 秒、`pmsetTTL` 10 → 30 秒。
+这两个缓存 TTL 就是 `system_profiler` 与 `pmset` 各被 fork 一次的频率，读出来的只是
+外设电量，晚一分钟对这类读数没有影响。
+
+### 7. DB 写盘前不再白编码一次，节流 30 秒 → 60 秒
 
 `Kit/plugins/DB.swift`：`insert()` 原来每次调用都先 `JSONEncoder().encode(value)`，
-再判断这一轮要不要真写盘（内部有 30 秒节流）。被节流掉的那些次，编码结果是直接扔掉的。
-把编码挪到节流判断之后。
+再判断这一轮要不要真写盘（内部有节流）。被节流掉的那些次，编码结果是直接扔掉的。
+把编码挪到节流判断之后，同时把节流从 30 秒放到 60 秒——这份「最后一次读数」只在下次
+启动时用来让菜单栏不至于空一瞬，晚一分钟没有区别，而 LevelDB 的写入量减半。
 
-### 5. app 进程不再链接 WidgetKit / SwiftUI / Charts
+### 8. 内嵌 LevelDB 的缓冲区收回收（常驻约省 2.5 M）
+
+`Kit/lldb/lldb.m`：`leveldb::Options` 原来只设 `create_if_missing`，其余全默认。
+默认 `write_buffer_size` 是 4 MB（未落盘的 memtable 整个住在内存里，LevelDB 的注释还
+写明最多可能同时持有两个），不设 `block_cache` 时内部会自建 8 MB 的 LRU。Stats 全部
+数据才几百 KB 到几 MB，这两个默认值纯占地方。改成 1 MB / 2 MB 后落表从约 70 分钟一次
+变成约 20 分钟一次，每次落表加 compaction 实测 10–20 ms、产出只有几十 KB，代价可以忽略。
+
+### 9. app 进程不再链接 WidgetKit / SwiftUI / Charts
 
 `Kit/helpers.swift` 的 `import WidgetKit` 与 `SystemWidgetUpdates` 里两处
 `WidgetCenter` 调用包进 `#if WIDGET_KIT`，而这个标志有意不在工程里定义；五个模块的
@@ -72,6 +107,15 @@ WidgetsExtension 目标。桌面组件本身没有被删掉，它整套住在 Wi
 （用一个只含 `NSApplication.run()` 的空 AppKit 程序即可复现），所以断开链接只省下
 约 5–10 M。留着它的真正理由是让 app 与 11 个模块框架的依赖关系变干净，以及让上面
 第 1 项的懒加载不会连带触发 WidgetKit 那套东西。
+
+## 还有什么没动
+
+启动时每个模块仍会预建五棵视图树（`Settings` / `Popup` / `Portal` / `Notifications` /
+`Preview`，见各模块 `main.swift` 的 `init`），实测合计约 10–14 M。其中 `Settings` 的
+行是在 `load(widgets:)` 里建的、`init` 本身很便宜，真正贵的是 `Popup` 与 `Preview`
+子类在 `init` 里直接铺行，以及 `PortalWrapper.init` 调的 `load()`。这一批要改成懒加载
+得同时动 10 个模块的约 400 处引用（每个访问点都要区分「已建好」和「顺手建出来」），
+收益是当前占用的 15 % 左右，但界面回归风险明显高于上面各项，所以这一轮没做。
 
 ## 安装
 

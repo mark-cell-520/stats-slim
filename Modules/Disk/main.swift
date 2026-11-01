@@ -282,6 +282,10 @@ public class Disk: Module {
         }
         self.settingsView.setInterval = { [weak self] value in
             self?.capacityReader?.setInterval(value)
+            // 活动读数以前被钉在 1 秒、设置界面里的间隔对它无效。它和容量读数本来就用同一个
+            // 「Update interval」，用户在界面上改完，两个都该跟着变（菜单栏带图表控件时
+            // activityCallback 会把间隔压回 1，那时两个一起变，和上游行为一致）。
+            self?.activityReader?.setInterval(value)
         }
         self.settingsView.setSMARTInterval = { [weak self] value in
             self?.smartReader?.setInterval(value)
